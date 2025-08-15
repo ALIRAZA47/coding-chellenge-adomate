@@ -7,13 +7,29 @@ export const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, s
 
 // Check if Supabase is configured
 export const isSupabaseConfigured = () => {
+  if (!supabaseUrl || !supabaseKey) {
+    console.warn('⚠️ Supabase not configured: Missing environment variables')
+    return false
+  }
+  
+  // Check for common URL mistakes
+  if (supabaseUrl.includes('dashboard') || supabaseUrl.includes('/project/')) {
+    console.error('❌ Invalid Supabase URL: You\'re using the dashboard URL instead of the API URL')
+    console.error('❌ Wrong:', supabaseUrl)
+    console.error('✅ Correct format: https://yourproject.supabase.co')
+    return false
+  }
+  
   return !!(supabaseUrl && supabaseKey && supabase)
 }
 
 // Utility functions for image storage
 export const uploadImageToSupabase = async (imageBase64: string): Promise<string> => {
   if (!isSupabaseConfigured()) {
-    throw new Error('Supabase is not configured. Please add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY to your environment variables.')
+    const errorMsg = !supabaseUrl || !supabaseKey 
+      ? 'Supabase is not configured. Please add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY to your environment variables.'
+      : 'Invalid Supabase URL. Please use the correct API URL format: https://yourproject.supabase.co'
+    throw new Error(errorMsg)
   }
 
   try {
@@ -83,6 +99,11 @@ export const getImageFromSupabase = async (imagePath: string): Promise<string> =
   }
 }
 
+// Force Supabase usage for all image storage (no localStorage fallback)
+export const shouldUseSupabase = (): boolean => {
+  return isSupabaseConfigured()
+}
+
 export const deleteImageFromSupabase = async (imagePath: string): Promise<void> => {
   if (!isSupabaseConfigured()) {
     throw new Error('Supabase is not configured.')
@@ -107,7 +128,7 @@ export const deleteImageFromSupabase = async (imagePath: string): Promise<void> 
   }
 }
 
-// Get public URL for an image stored in Supabase
+// Get public URL for an image stored in Supabase with CORS-safe URL
 export const getImagePublicUrl = (imagePath: string): string => {
   if (!isSupabaseConfigured()) {
     throw new Error('Supabase is not configured.')
@@ -118,6 +139,37 @@ export const getImagePublicUrl = (imagePath: string): string => {
     .getPublicUrl(imagePath)
   
   return data.publicUrl
+}
+
+// Get CORS-safe URL for image loading in canvas/fabric.js
+export const getCORSSafeImageUrl = async (imagePath: string): Promise<string> => {
+  if (!isSupabaseConfigured()) {
+    throw new Error('Supabase is not configured.')
+  }
+
+  try {
+    // First try to get the image as blob, then convert to data URL
+    const { data, error } = await supabase!.storage
+      .from('images')
+      .download(imagePath)
+    
+    if (error) {
+      console.error('❌ Supabase download error:', error)
+      throw error
+    }
+    
+    // Convert blob to base64 data URL to avoid CORS issues
+    const base64 = await new Promise<string>((resolve) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result as string)
+      reader.readAsDataURL(data)
+    })
+    
+    return base64
+  } catch (error) {
+    console.error('❌ Failed to get CORS-safe URL from Supabase:', error)
+    throw error
+  }
 }
 
 // Get signed URL for private access (alternative to public URL)

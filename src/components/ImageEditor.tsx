@@ -13,7 +13,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Slider } from '@/components/ui/slider';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { cn } from '@/lib/utils';
-import { uploadImageToSupabase, getImageFromSupabase, deleteImageFromSupabase, isSupabaseConfigured } from '@/lib/supabase';
+import { uploadImageToSupabase, getImageFromSupabase, deleteImageFromSupabase, shouldUseSupabase } from '@/lib/supabase';
 
 interface TextLayer {
   id: string;
@@ -39,6 +39,18 @@ interface DesignState {
   canvasHeight: number;
 }
 
+interface UploadState {
+  isUploading: boolean;
+  tempImageUrl?: string;
+}
+
+interface LoadingState {
+  canvas: boolean;
+  imageLoad: boolean;
+  upload: boolean;
+  message?: string;
+}
+
 // const GOOGLE_FONTS_API_KEY = process.env.NEXT_PUBLIC_GOOGLE_FONTS_API_KEY || '';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -60,6 +72,13 @@ export default function ImageEditor() {
   const [googleFonts, setGoogleFonts] = useState<string[]>([]);
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [currentColor, setCurrentColor] = useState('#000000');
+  const [uploadState, setUploadState] = useState<UploadState>({ isUploading: false });
+  const [loadingState, setLoadingState] = useState<LoadingState>({
+    canvas: true,
+    imageLoad: false,
+    upload: false,
+    message: 'Initializing canvas...'
+  });
 
   // Load Google Fonts
   useEffect(() => {
@@ -77,59 +96,148 @@ export default function ImageEditor() {
     loadGoogleFonts();
   }, []);
 
-  // Initialize Fabric.js canvas
+  // Initialize Fabric.js canvas with better error handling and timing
   useEffect(() => {
-    if (!canvasRef.current) return;
+    if (!canvasRef.current) {
+      console.warn('Canvas ref not available yet');
+      return;
+    }
 
     console.log('Initializing canvas with size:', canvasSize.width, 'x', canvasSize.height);
-
-    const fabricCanvas = new fabric.Canvas(canvasRef.current, {
-      width: canvasSize.width,
-      height: canvasSize.height,
-      backgroundColor: '#ffffff',
-    });
-
-    console.log('Canvas initialized successfully');
     
-    // Wait for canvas to be fully ready
-    setTimeout(() => {
-      console.log('Canvas fully initialized and ready');
-    }, 100);
-
-    // Enable snap to center
-    fabricCanvas.on('object:moving', (e) => {
-      const obj = e.target;
-      if (!obj) return;
-
-      const centerX = fabricCanvas.width! / 2;
-      const centerY = fabricCanvas.height! / 2;
-      const threshold = 10;
-
-      if (Math.abs(obj.left! - centerX) < threshold) {
-        obj.set('left', centerX);
+    let fabricCanvas: fabric.Canvas | null = null;
+    let initAttempts = 0;
+    const maxInitAttempts = 5;
+    
+    const initializeCanvas = () => {
+      try {
+        initAttempts++;
+        console.log(`Canvas initialization attempt ${initAttempts}/${maxInitAttempts}`);
+        
+        if (!canvasRef.current) {
+          throw new Error('Canvas ref not available');
+        }
+        
+        // Check if canvas element is properly mounted
+        if (!canvasRef.current.getContext) {
+          throw new Error('Canvas context not available');
+        }
+        
+        fabricCanvas = new fabric.Canvas(canvasRef.current, {
+          width: canvasSize.width,
+          height: canvasSize.height,
+          backgroundColor: '#ffffff',
+        });
+        
+        // Verify canvas was created properly
+        if (!fabricCanvas || !fabricCanvas.lowerCanvasEl || !fabricCanvas.getContext) {
+          throw new Error('Fabric canvas creation failed');
+        }
+        
+        console.log('Canvas initialized successfully');
+        
+        // Test canvas rendering capability
+        try {
+          fabricCanvas.renderAll();
+          console.log('Canvas render test successful');
+        } catch (renderError) {
+          throw new Error(`Canvas render test failed: ${renderError}`);
+        }
+        
+        return fabricCanvas;
+      } catch (error) {
+        console.error(`Canvas initialization attempt ${initAttempts} failed:`, error);
+        
+        if (fabricCanvas) {
+          try {
+            fabricCanvas.dispose();
+          } catch (disposeError) {
+            console.warn('Error disposing failed canvas:', disposeError);
+          }
+          fabricCanvas = null;
+        }
+        
+        if (initAttempts < maxInitAttempts) {
+          console.log(`Retrying canvas initialization in 200ms...`);
+          setTimeout(initializeCanvas, 200);
+          return null;
+        } else {
+          console.error('Canvas initialization failed after maximum attempts');
+          setLoadingState(prev => ({ 
+            ...prev, 
+            canvas: false, 
+            message: 'Canvas initialization failed' 
+          }));
+          alert('Canvas failed to initialize. Please refresh the page and try again.');
+          return null;
+        }
       }
-      if (Math.abs(obj.top! - centerY) < threshold) {
-        obj.set('top', centerY);
+    };
+    
+    // Start initialization with a small delay to ensure DOM is ready
+    const initTimer = setTimeout(() => {
+      const canvas = initializeCanvas();
+      if (!canvas) return;
+      
+            fabricCanvas = canvas;
+
+      if (fabricCanvas) {
+        // Enable snap to center
+        fabricCanvas.on('object:moving', (e) => {
+          const obj = e.target;
+          if (!obj || !fabricCanvas) return;
+
+          const centerX = fabricCanvas.width! / 2;
+          const centerY = fabricCanvas.height! / 2;
+          const threshold = 10;
+
+          if (Math.abs(obj.left! - centerX) < threshold) {
+            obj.set('left', centerX);
+          }
+          if (Math.abs(obj.top! - centerY) < threshold) {
+            obj.set('top', centerY);
+          }
+        });
+
+        // Handle object selection
+        fabricCanvas.on('selection:created', (e) => {
+          const obj = e.selected?.[0];
+          if (obj && obj.type === 'i-text') {
+            const layerId = (obj as FabricObject).layerId;
+            setSelectedTextLayer(layerId);
+          }
+        });
+
+        fabricCanvas.on('selection:cleared', () => {
+          setSelectedTextLayer(null);
+        });
       }
-    });
 
-    // Handle object selection
-    fabricCanvas.on('selection:created', (e) => {
-      const obj = e.selected?.[0];
-      if (obj && obj.type === 'i-text') {
-        const layerId = (obj as FabricObject).layerId;
-        setSelectedTextLayer(layerId);
+      if (fabricCanvas) {
+        setCanvas(fabricCanvas);
+        
+        // Mark canvas as ready after a brief delay
+        setTimeout(() => {
+          setLoadingState(prev => ({ 
+            ...prev, 
+            canvas: false, 
+            message: undefined 
+          }));
+          console.log('Canvas fully initialized and marked as ready');
+        }, 300);
       }
-    });
-
-    fabricCanvas.on('selection:cleared', () => {
-      setSelectedTextLayer(null);
-    });
-
-    setCanvas(fabricCanvas);
+    }, 100); // Initial delay to ensure DOM is fully ready
 
     return () => {
-      fabricCanvas.dispose();
+      clearTimeout(initTimer);
+      if (fabricCanvas) {
+        try {
+          fabricCanvas.dispose();
+          console.log('Canvas disposed successfully');
+        } catch (error) {
+          console.warn('Error disposing canvas:', error);
+        }
+      }
     };
   }, [canvasSize.width, canvasSize.height]);
 
@@ -154,23 +262,61 @@ export default function ImageEditor() {
     setHistory(newHistory);
   }, [backgroundImage, textLayers, canvasSize, history, historyIndex]);
 
-  const loadBackgroundImage = useCallback((imageUrl: string, fabricCanvas: fabric.Canvas) => {
-    console.log('Loading background image...');
+  const loadBackgroundImage = useCallback((imageUrl: string, fabricCanvas: fabric.Canvas, isFromSupabase = false, retryCount = 0) => {
+    console.log('Loading background image...', isFromSupabase ? '(from Supabase)' : '(data URL)', `(retry: ${retryCount})`);
+    
+    setLoadingState(prev => ({ 
+      ...prev, 
+      imageLoad: true, 
+      message: isFromSupabase ? 'Loading image from Supabase...' : 'Loading image...' 
+    }));
     
     // Check if canvas is ready before proceeding
-    if (!fabricCanvas || !fabricCanvas.lowerCanvasEl) {
-      console.warn('Canvas not ready, deferring image load');
-      setTimeout(() => {
-        if (fabricCanvas && fabricCanvas.lowerCanvasEl) {
-          loadBackgroundImage(imageUrl, fabricCanvas);
-        } else {
-          console.error('Canvas still not ready after delay');
-        }
-      }, 500);
-      return;
+    const isCanvasReady = () => {
+      try {
+        return fabricCanvas && 
+               fabricCanvas.lowerCanvasEl && 
+               typeof fabricCanvas.getContext === 'function' && 
+               fabricCanvas.lowerCanvasEl.getContext && 
+               fabricCanvas.lowerCanvasEl.getContext('2d') &&
+               !(fabricCanvas as { disposed?: boolean }).disposed;
+      } catch (error) {
+        console.warn('Canvas readiness check failed:', error);
+        return false;
+      }
+    };
+    
+    if (!isCanvasReady()) {
+      if (retryCount < 15) { // Increased to 15 retries (7.5 seconds)
+        console.warn(`Canvas not ready, retry ${retryCount + 1}/15`);
+        setTimeout(() => {
+          loadBackgroundImage(imageUrl, fabricCanvas, isFromSupabase, retryCount + 1);
+        }, 500);
+        return;
+      } else {
+        console.error('Canvas still not ready after maximum retries');
+        console.error('Canvas state:', {
+          fabricCanvas: !!fabricCanvas,
+          lowerCanvasEl: !!fabricCanvas?.lowerCanvasEl,
+          getContext: !!fabricCanvas?.getContext,
+          disposed: (fabricCanvas as { disposed?: boolean })?.disposed
+        });
+        setLoadingState(prev => ({ 
+          ...prev, 
+          imageLoad: false, 
+          message: 'Canvas not responding' 
+        }));
+        alert('Canvas is not responding. Please refresh the page and try again.');
+        return;
+      }
     }
     
-    fabric.Image.fromURL(imageUrl).then((img) => {
+    // For Supabase images with potential CORS issues, use the data URL approach
+    const loadImage = isFromSupabase && imageUrl.includes('.supabase.co') 
+      ? fabric.Image.fromURL(imageUrl, { crossOrigin: 'anonymous' })
+      : fabric.Image.fromURL(imageUrl);
+    
+    loadImage.then((img) => {
       console.log('Image loaded successfully:', img.width, 'x', img.height);
       
       // Calculate new canvas size maintaining aspect ratio
@@ -180,7 +326,7 @@ export default function ImageEditor() {
       const imgHeight = img.height!;
       const imgAspect = imgWidth / imgHeight;
       
-      let newWidth, newHeight;
+      let newWidth: number, newHeight: number;
       
       if (imgWidth > maxWidth || imgHeight > maxHeight) {
         if (imgAspect > maxWidth / maxHeight) {
@@ -246,10 +392,20 @@ export default function ImageEditor() {
       setTimeout(() => {
         fabricCanvas.renderAll();
         console.log('Canvas re-rendered');
+        setLoadingState(prev => ({ 
+          ...prev, 
+          imageLoad: false, 
+          message: undefined 
+        }));
       }, 100);
       
     }).catch((error) => {
       console.error('Error loading image:', error);
+      setLoadingState(prev => ({ 
+        ...prev, 
+        imageLoad: false, 
+        message: undefined 
+      }));
       alert('Failed to load image. Please try again.');
     });
   }, []);
@@ -335,8 +491,8 @@ export default function ImageEditor() {
           // Handle background image
           let backgroundImageData = designState.backgroundImage;
           
-          // If there's a Supabase image path, load from Supabase
-          if (designState.backgroundImagePath && isSupabaseConfigured()) {
+          // Always prioritize Supabase if configured and path exists
+          if (designState.backgroundImagePath && shouldUseSupabase()) {
             console.log('🖼️ Loading image from Supabase with path:', designState.backgroundImagePath);
             try {
               backgroundImageData = await getImageFromSupabase(designState.backgroundImagePath);
@@ -347,9 +503,14 @@ export default function ImageEditor() {
               }
             } catch (error) {
               console.error('❌ Failed to load image from Supabase:', error);
+              // Only fall back to localStorage if Supabase fails and data exists
+              if (designState.backgroundImage) {
+                console.log('⚠️ Falling back to localStorage image');
+                backgroundImageData = designState.backgroundImage;
+              }
             }
           } else if (designState.backgroundImage) {
-            console.log('📱 Using image from localStorage');
+            console.log('📱 Using image from localStorage (no Supabase path available)');
             backgroundImageData = designState.backgroundImage;
           }
           
@@ -359,13 +520,13 @@ export default function ImageEditor() {
             
             // Wait a bit for state to update before loading to canvas
             setTimeout(() => {
-              if (canvas && canvas.lowerCanvasEl) {
-                loadBackgroundImage(backgroundImageData, canvas);
+              if (canvas && canvas.lowerCanvasEl && backgroundImageData) {
+                loadBackgroundImage(backgroundImageData, canvas, !!designState.backgroundImagePath);
               } else {
                 console.log('⏳ Canvas not ready, retrying image load...');
                 setTimeout(() => {
-                  if (canvas && canvas.lowerCanvasEl) {
-                    loadBackgroundImage(backgroundImageData, canvas);
+                  if (canvas && canvas.lowerCanvasEl && backgroundImageData) {
+                    loadBackgroundImage(backgroundImageData, canvas, !!designState.backgroundImagePath);
                   }
                 }, 500);
               }
@@ -398,12 +559,19 @@ export default function ImageEditor() {
   // Autosave functionality - Always use Supabase for images
   useEffect(() => {
     if (!canvas) return;
+    
+    // Don't save during upload process
+    if (uploadState.isUploading) {
+      console.log('⏳ Skipping autosave - upload in progress');
+      return;
+    }
 
     const saveToStorage = async () => {
       try {
         console.log('=== SAVING DESIGN STATE ===');
         console.log('Background image exists:', !!backgroundImage);
         console.log('Text layers count:', textLayers.length);
+        console.log('Upload state:', uploadState);
         
         const designState: DesignState = {
           backgroundImage: null, // Never store in localStorage
@@ -412,50 +580,58 @@ export default function ImageEditor() {
           canvasHeight: canvasSize.height,
         };
         
-        // Use Supabase for images if configured, otherwise store in localStorage
-        if (backgroundImage) {
-          if (isSupabaseConfigured()) {
-            console.log('🖼️ Saving image to Supabase...');
-            try {
-              // Delete previous image if exists
-              const saved = localStorage.getItem('imageTextComposerDesign');
-              if (saved) {
+        // Only save if we have a stable background image (not during upload)
+        if (backgroundImage && !uploadState.isUploading) {
+          if (shouldUseSupabase()) {
+            // Check if this image is already from Supabase (avoid re-uploading)
+            const saved = localStorage.getItem('imageTextComposerDesign');
+            let existingPath: string | undefined;
+            
+            if (saved) {
+              try {
                 const prevState = JSON.parse(saved);
-                if (prevState.backgroundImagePath) {
-                  console.log('🗑️ Deleting previous image from Supabase...');
-                  try {
-                    await deleteImageFromSupabase(prevState.backgroundImagePath);
-                  } catch (deleteError) {
-                    console.warn('⚠️ Could not delete previous image:', deleteError);
+                existingPath = prevState.backgroundImagePath;
+              } catch {
+                console.warn('Could not parse existing state');
+              }
+            }
+            
+            // If we already have a Supabase path for this image, don't re-upload
+            if (existingPath) {
+              console.log('✅ Using existing Supabase path:', existingPath);
+              designState.backgroundImagePath = existingPath;
+            } else {
+              console.log('🖼️ Image needs to be uploaded to Supabase...');
+              // This should only happen if the image was set directly without going through upload
+              try {
+                const imagePath = await uploadImageToSupabase(backgroundImage);
+                designState.backgroundImagePath = imagePath;
+                console.log('✅ Image saved to Supabase with path:', imagePath);
+                
+                // Delete any previous image
+                if (saved) {
+                  const prevState = JSON.parse(saved);
+                  if (prevState.backgroundImagePath && prevState.backgroundImagePath !== imagePath) {
+                    console.log('🗑️ Deleting previous image from Supabase...');
+                    try {
+                      await deleteImageFromSupabase(prevState.backgroundImagePath);
+                    } catch (deleteError) {
+                      console.warn('⚠️ Could not delete previous image:', deleteError);
+                    }
                   }
                 }
-              }
-              
-              const imagePath = await uploadImageToSupabase(backgroundImage);
-              designState.backgroundImagePath = imagePath;
-              console.log('✅ Image saved to Supabase with path:', imagePath);
-            } catch (supabaseError) {
-              console.error('❌ Supabase save failed, falling back to localStorage:', supabaseError);
-              // Fallback to localStorage
-              if (backgroundImage.length < 5 * 1024 * 1024) { // 5MB limit for localStorage
-                designState.backgroundImage = backgroundImage;
-                console.log('📱 Fallback: Image saved to localStorage');
-              } else {
-                console.warn('⚠️ Image too large for localStorage fallback');
+              } catch (supabaseError) {
+                console.error('❌ Supabase save failed:', supabaseError);
+                // Don't use localStorage fallback - require Supabase
+                throw new Error('Failed to save image to Supabase. Please check your Supabase configuration.');
               }
             }
           } else {
-            console.log('⚠️ Supabase not configured, using localStorage fallback');
-            // Fallback to localStorage
-            if (backgroundImage.length < 5 * 1024 * 1024) { // 5MB limit for localStorage
-              designState.backgroundImage = backgroundImage;
-              console.log('📱 Image saved to localStorage');
-            } else {
-              console.warn('⚠️ Image too large for localStorage, skipping save');
-            }
+            console.error('❌ Supabase not configured. Image storage requires Supabase setup.');
+            throw new Error('Supabase is required for image storage. Please configure your environment variables.');
           }
         } else {
-          console.log('ℹ️ No background image to save');
+          console.log('ℹ️ No background image to save or upload in progress');
         }
         
         // Save to localStorage (lightweight now)
@@ -473,9 +649,9 @@ export default function ImageEditor() {
 
     const timer = setTimeout(saveToStorage, 2000); // Slightly longer delay for Supabase
     return () => clearTimeout(timer);
-  }, [backgroundImage, textLayers, canvasSize, canvas]);
+  }, [backgroundImage, textLayers, canvasSize, canvas, uploadState]);
 
-  const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImageUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) {
       console.log('No file selected');
@@ -496,15 +672,79 @@ export default function ImageEditor() {
     console.log('Loading PNG file:', file.name, file.size, 'bytes');
 
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       const imageUrl = e.target?.result as string;
       console.log('File read successfully, data URL length:', imageUrl.length);
       
-      // Set background image first, then load it
-      setBackgroundImage(imageUrl);
+      // Set upload state and temp image
+      setUploadState({ isUploading: true, tempImageUrl: imageUrl });
+      setLoadingState(prev => ({ 
+        ...prev, 
+        upload: true, 
+        message: 'Preparing image...' 
+      }));
       
-      // Load the image to canvas immediately
-      loadBackgroundImage(imageUrl, canvas);
+      // Load the image to canvas immediately for user feedback
+      loadBackgroundImage(imageUrl, canvas, false);
+      
+      try {
+        if (shouldUseSupabase()) {
+          console.log('🚀 Starting Supabase upload...');
+          setLoadingState(prev => ({ 
+            ...prev, 
+            message: 'Uploading to Supabase...' 
+          }));
+          
+          // Upload to Supabase first
+          const imagePath = await uploadImageToSupabase(imageUrl);
+          console.log('✅ Supabase upload completed, path:', imagePath);
+          
+          setLoadingState(prev => ({ 
+            ...prev, 
+            message: 'Retrieving uploaded image...' 
+          }));
+          
+          // Now get the uploaded image from Supabase
+          const uploadedImageUrl = await getImageFromSupabase(imagePath);
+          console.log('✅ Retrieved uploaded image from Supabase');
+          
+          setLoadingState(prev => ({ 
+            ...prev, 
+            message: 'Updating canvas...' 
+          }));
+          
+          // Set the actual background image from Supabase
+          setBackgroundImage(uploadedImageUrl);
+          
+          // Reload canvas with Supabase image
+          loadBackgroundImage(uploadedImageUrl, canvas, true);
+          
+          console.log('✅ Upload flow completed successfully');
+        } else {
+          // Fallback: just use the local image
+          console.log('⚠️ Supabase not configured, using local image');
+          setBackgroundImage(imageUrl);
+        }
+      } catch (error) {
+        console.error('❌ Upload failed:', error);
+        // Keep the temp image as fallback
+        setBackgroundImage(imageUrl);
+        setLoadingState(prev => ({ 
+          ...prev, 
+          message: 'Upload failed, using local image' 
+        }));
+        alert('Failed to upload to Supabase. Using local image as fallback.');
+      } finally {
+        // Clear upload state
+        setUploadState({ isUploading: false });
+        setTimeout(() => {
+          setLoadingState(prev => ({ 
+            ...prev, 
+            upload: false, 
+            message: undefined 
+          }));
+        }, 1000);
+      }
       
       // Clear the file input so the same file can be selected again
       event.target.value = '';
@@ -515,6 +755,13 @@ export default function ImageEditor() {
     reader.onerror = (error) => {
       console.error('FileReader error:', error);
       alert('Failed to read the file. Please try again.');
+      setUploadState({ isUploading: false });
+      setLoadingState(prev => ({ 
+        ...prev, 
+        upload: false, 
+        imageLoad: false, 
+        message: undefined 
+      }));
     };
     
     reader.readAsDataURL(file);
@@ -594,16 +841,28 @@ export default function ImageEditor() {
   const moveLayerUp = (layerId: string) => {
     const layer = textLayers.find(l => l.id === layerId);
     if (layer?.fabricObject && canvas) {
-      canvas.bringObjectForward(layer.fabricObject);
-      canvas.renderAll();
+      const currentIndex = canvas.getObjects().indexOf(layer.fabricObject);
+      if (currentIndex < canvas.getObjects().length - 1) {
+        canvas.bringObjectForward(layer.fabricObject);
+        canvas.renderAll();
+        console.log('Layer moved up:', layerId);
+      } else {
+        console.log('Layer already at top:', layerId);
+      }
     }
   };
 
   const moveLayerDown = (layerId: string) => {
     const layer = textLayers.find(l => l.id === layerId);
     if (layer?.fabricObject && canvas) {
-      canvas.sendObjectBackwards(layer.fabricObject);
-      canvas.renderAll();
+      const currentIndex = canvas.getObjects().indexOf(layer.fabricObject);
+      if (currentIndex > 0) {
+        canvas.sendObjectBackwards(layer.fabricObject);
+        canvas.renderAll();
+        console.log('Layer moved down:', layerId);
+      } else {
+        console.log('Layer already at bottom:', layerId);
+      }
     }
   };
 
@@ -632,7 +891,7 @@ export default function ImageEditor() {
     canvas.setDimensions({ width: state.canvasWidth, height: state.canvasHeight });
     
     if (state.backgroundImage) {
-      loadBackgroundImage(state.backgroundImage, canvas);
+      loadBackgroundImage(state.backgroundImage, canvas, false);
     }
     
     state.textLayers.forEach(layer => {
@@ -781,10 +1040,26 @@ export default function ImageEditor() {
                 onClick={() => fileInputRef.current?.click()}
                 className="w-full"
                 variant="outline"
+                disabled={loadingState.upload || loadingState.canvas}
               >
-                <Upload className="w-4 h-4 mr-2" />
-                Choose PNG File
+                {loadingState.upload ? (
+                  <>
+                    <div className="animate-spin rounded-full h-4 w-4 border-2 border-current border-t-transparent mr-2"></div>
+                    Processing...
+                  </>
+                ) : (
+                  <>
+                    <Upload className="w-4 h-4 mr-2" />
+                    Choose PNG File
+                  </>
+                )}
               </Button>
+              {(loadingState.upload || loadingState.imageLoad) && loadingState.message && (
+                <div className="mt-2 text-sm text-primary flex items-center">
+                  <div className="animate-spin rounded-full h-3 w-3 border-2 border-current border-t-transparent mr-2"></div>
+                  {loadingState.message}
+                </div>
+              )}
               <input
                 ref={fileInputRef}
                 type="file"
@@ -1128,8 +1403,35 @@ export default function ImageEditor() {
             ref={canvasRef}
             className="border border-border rounded-md"
             style={{ maxWidth: '100%', maxHeight: '100%' }}
+            width={canvasSize.width}
+            height={canvasSize.height}
           />
-          {!backgroundImage && (
+          
+          {/* Loading Overlay */}
+          {(loadingState.canvas || loadingState.imageLoad || loadingState.upload) && (
+            <div className="absolute inset-0 bg-background/80 backdrop-blur-sm flex items-center justify-center rounded-md">
+              <div className="text-center p-6">
+                <div className="relative">
+                  <div className="animate-spin rounded-full h-12 w-12 border-4 border-primary border-t-transparent mx-auto mb-4"></div>
+                  {loadingState.upload && (
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <Upload className="w-6 h-6 text-primary" />
+                    </div>
+                  )}
+                </div>
+                <p className="text-lg font-medium text-foreground">
+                  {loadingState.message || 'Loading...'}
+                </p>
+                {loadingState.upload && (
+                  <p className="text-sm text-muted-foreground mt-2">
+                    Please wait while we process your image
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+          
+          {!backgroundImage && !loadingState.canvas && !loadingState.imageLoad && !loadingState.upload && (
             <div className="absolute inset-4 flex items-center justify-center text-muted-foreground pointer-events-none">
               <div className="text-center">
                 <Upload className="w-12 h-12 mx-auto mb-4 opacity-50" />
