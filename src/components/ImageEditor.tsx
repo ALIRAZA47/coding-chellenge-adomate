@@ -31,6 +31,16 @@ interface TextLayer {
   fabricObject?: fabric.IText;
 }
 
+interface ImageLayer {
+  id: string;
+  type: 'background';
+  name: string;
+  url: string | null;
+  path?: string; // Supabase path
+  visible: boolean;
+  thumbnail?: string;
+}
+
 interface DesignState {
   backgroundImage: string | null;
   backgroundImagePath?: string; // Path for Supabase stored images
@@ -65,6 +75,7 @@ export default function ImageEditor() {
   const [canvas, setCanvas] = useState<fabric.Canvas | null>(null);
   const [selectedTextLayer, setSelectedTextLayer] = useState<string | null>(null);
   const [textLayers, setTextLayers] = useState<TextLayer[]>([]);
+  const [imageLayers, setImageLayers] = useState<ImageLayer[]>([]);
   const [history, setHistory] = useState<DesignState[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [backgroundImage, setBackgroundImage] = useState<string | null>(null);
@@ -555,6 +566,80 @@ export default function ImageEditor() {
   }, []);
 
   // Debug function to check and fix layer references
+  // Generate thumbnail for image layers
+  const generateThumbnail = (imageUrl: string): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          reject(new Error('Could not get canvas context'));
+          return;
+        }
+        
+        // Set thumbnail size
+        const size = 48;
+        canvas.width = size;
+        canvas.height = size;
+        
+        // Calculate dimensions to maintain aspect ratio
+        const aspectRatio = img.width / img.height;
+        let drawWidth = size;
+        let drawHeight = size;
+        let offsetX = 0;
+        let offsetY = 0;
+        
+        if (aspectRatio > 1) {
+          drawHeight = size / aspectRatio;
+          offsetY = (size - drawHeight) / 2;
+        } else {
+          drawWidth = size * aspectRatio;
+          offsetX = (size - drawWidth) / 2;
+        }
+        
+        // Draw the image
+        ctx.fillStyle = '#f0f0f0';
+        ctx.fillRect(0, 0, size, size);
+        ctx.drawImage(img, offsetX, offsetY, drawWidth, drawHeight);
+        
+        resolve(canvas.toDataURL('image/jpeg', 0.8));
+      };
+      img.onerror = () => reject(new Error('Failed to load image'));
+      img.src = imageUrl;
+    });
+  };
+
+  // Update image layers when background image changes
+  useEffect(() => {
+    if (backgroundImage) {
+      generateThumbnail(backgroundImage).then(thumbnail => {
+        const imageLayer: ImageLayer = {
+          id: 'background-image',
+          type: 'background',
+          name: 'Background Image',
+          url: backgroundImage,
+          visible: true,
+          thumbnail
+        };
+        setImageLayers([imageLayer]);
+      }).catch(error => {
+        console.warn('Failed to generate thumbnail:', error);
+        const imageLayer: ImageLayer = {
+          id: 'background-image',
+          type: 'background',
+          name: 'Background Image',
+          url: backgroundImage,
+          visible: true
+        };
+        setImageLayers([imageLayer]);
+      });
+    } else {
+      setImageLayers([]);
+    }
+  }, [backgroundImage]);
+
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const debugLayerReferences = () => {
     if (!canvas) {
@@ -1030,10 +1115,17 @@ export default function ImageEditor() {
 
   const moveLayerUp = (layerId: string) => {
     console.log('Moving layer up:', layerId);
-    const layer = textLayers.find(l => l.id === layerId);
     
-    if (!layer) {
+    // Find current layer index in the array
+    const currentIndex = textLayers.findIndex(l => l.id === layerId);
+    if (currentIndex === -1) {
       console.warn('Layer not found:', layerId);
+      return;
+    }
+    
+    // Can't move up if already at the top (highest z-index)
+    if (currentIndex === textLayers.length - 1) {
+      console.log('Layer already at top:', layerId);
       return;
     }
     
@@ -1042,8 +1134,16 @@ export default function ImageEditor() {
       return;
     }
     
-    // Find the fabric object by layerId if fabricObject reference is lost
+    // Update the text layers array order
+    const newTextLayers = [...textLayers];
+    const [movedLayer] = newTextLayers.splice(currentIndex, 1);
+    newTextLayers.splice(currentIndex + 1, 0, movedLayer);
+    setTextLayers(newTextLayers);
+    
+    // Update fabric canvas z-order
+    const layer = textLayers[currentIndex];
     let fabricObject = layer.fabricObject;
+    
     if (!fabricObject) {
       console.log('FabricObject reference lost, searching by layerId');
       fabricObject = canvas.getObjects().find(obj => (obj as FabricObject).layerId === layerId) as fabric.IText;
@@ -1057,16 +1157,10 @@ export default function ImageEditor() {
     }
     
     if (fabricObject) {
-      const currentIndex = canvas.getObjects().indexOf(fabricObject);
-      console.log('Current index:', currentIndex, 'Total objects:', canvas.getObjects().length);
-      
-      if (currentIndex < canvas.getObjects().length - 1) {
-        canvas.bringObjectForward(fabricObject);
-        canvas.renderAll();
-        console.log('Layer moved up successfully:', layerId);
-      } else {
-        console.log('Layer already at top:', layerId);
-      }
+      canvas.bringObjectForward(fabricObject);
+      canvas.renderAll();
+      console.log('Layer moved up successfully:', layerId);
+      addToHistory();
     } else {
       console.warn('FabricObject not found for layer:', layerId);
     }
@@ -1074,10 +1168,17 @@ export default function ImageEditor() {
 
   const moveLayerDown = (layerId: string) => {
     console.log('Moving layer down:', layerId);
-    const layer = textLayers.find(l => l.id === layerId);
     
-    if (!layer) {
+    // Find current layer index in the array
+    const currentIndex = textLayers.findIndex(l => l.id === layerId);
+    if (currentIndex === -1) {
       console.warn('Layer not found:', layerId);
+      return;
+    }
+    
+    // Can't move down if already at the bottom (lowest z-index)
+    if (currentIndex === 0) {
+      console.log('Layer already at bottom:', layerId);
       return;
     }
     
@@ -1086,8 +1187,16 @@ export default function ImageEditor() {
       return;
     }
     
-    // Find the fabric object by layerId if fabricObject reference is lost
+    // Update the text layers array order
+    const newTextLayers = [...textLayers];
+    const [movedLayer] = newTextLayers.splice(currentIndex, 1);
+    newTextLayers.splice(currentIndex - 1, 0, movedLayer);
+    setTextLayers(newTextLayers);
+    
+    // Update fabric canvas z-order
+    const layer = textLayers[currentIndex];
     let fabricObject = layer.fabricObject;
+    
     if (!fabricObject) {
       console.log('FabricObject reference lost, searching by layerId');
       fabricObject = canvas.getObjects().find(obj => (obj as FabricObject).layerId === layerId) as fabric.IText;
@@ -1101,16 +1210,10 @@ export default function ImageEditor() {
     }
     
     if (fabricObject) {
-      const currentIndex = canvas.getObjects().indexOf(fabricObject);
-      console.log('Current index:', currentIndex, 'Total objects:', canvas.getObjects().length);
-      
-      if (currentIndex > 0) {
-        canvas.sendObjectBackwards(fabricObject);
-        canvas.renderAll();
-        console.log('Layer moved down successfully:', layerId);
-      } else {
-        console.log('Layer already at bottom:', layerId);
-      }
+      canvas.sendObjectBackwards(fabricObject);
+      canvas.renderAll();
+      console.log('Layer moved down successfully:', layerId);
+      addToHistory();
     } else {
       console.warn('FabricObject not found for layer:', layerId);
     }
@@ -1222,6 +1325,7 @@ export default function ImageEditor() {
     
     setBackgroundImage(null);
     setTextLayers([]);
+    setImageLayers([]);
     setSelectedTextLayer(null);
     setHistory([]);
     setHistoryIndex(-1);
@@ -1600,30 +1704,138 @@ export default function ImageEditor() {
               <Card>
                 <CardHeader className="pb-3">
                   <CardTitle className="text-base">Layer Management</CardTitle>
-                  <CardDescription>Organize and control your text layers</CardDescription>
+                  <CardDescription>Organize and control all layers in your design</CardDescription>
                 </CardHeader>
                 <CardContent>
-                  {textLayers.length > 0 ? (
+                  {(imageLayers.length > 0 || textLayers.length > 0) ? (
                     <div className="space-y-2">
-                      {textLayers.map((layer) => (
+                      {/* Text Layers - rendered in reverse order (top layer first) */}
+                      {[...textLayers].reverse().map((layer, index) => {
+                        const actualIndex = textLayers.length - 1 - index;
+                        return (
+                          <div
+                            key={layer.id}
+                            className={cn(
+                              "p-3 border rounded-lg cursor-pointer transition-colors",
+                              selectedTextLayer === layer.id 
+                                ? "bg-primary/10 border-primary" 
+                                : "bg-background hover:bg-muted/50"
+                            )}
+                            onClick={() => setSelectedTextLayer(layer.id)}
+                          >
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-3 flex-1 min-w-0">
+                                {/* Text Layer Icon/Preview */}
+                                <div className="w-10 h-10 bg-muted rounded-md flex items-center justify-center flex-shrink-0">
+                                  <Type className="w-4 h-4 text-muted-foreground" />
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-center gap-2">
+                                    <p className="text-sm font-medium truncate">
+                                      {layer.text || 'Empty Text'}
+                                    </p>
+                                    <span className="text-xs bg-blue-100 text-blue-800 px-1.5 py-0.5 rounded">
+                                      Text
+                                    </span>
+                                  </div>
+                                  <p className="text-xs text-muted-foreground">
+                                    {layer.fontFamily} • {layer.fontSize}px • Layer {actualIndex + 1}
+                                  </p>
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-1 ml-2">
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    toggleLayerVisibility(layer.id);
+                                  }}
+                                  title={layer.visible ? "Hide layer" : "Show layer"}
+                                >
+                                  {layer.visible ? (
+                                    <Eye className="w-3 h-3" />
+                                  ) : (
+                                    <EyeOff className="w-3 h-3" />
+                                  )}
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    moveLayerUp(layer.id);
+                                  }}
+                                  disabled={actualIndex === textLayers.length - 1}
+                                  title="Move layer up"
+                                >
+                                  <ChevronUp className="w-3 h-3" />
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    moveLayerDown(layer.id);
+                                  }}
+                                  disabled={actualIndex === 0}
+                                  title="Move layer down"
+                                >
+                                  <ChevronDown className="w-3 h-3" />
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    deleteTextLayer(layer.id);
+                                  }}
+                                  className="text-destructive hover:text-destructive"
+                                  title="Delete layer"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                </Button>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      
+                      {/* Image Layers */}
+                      {imageLayers.map((layer) => (
                         <div
                           key={layer.id}
-                          className={cn(
-                            "p-3 border rounded-lg cursor-pointer transition-colors",
-                            selectedTextLayer === layer.id 
-                              ? "bg-primary/10 border-primary" 
-                              : "bg-background hover:bg-muted/50"
-                          )}
-                          onClick={() => setSelectedTextLayer(layer.id)}
+                          className="p-3 border rounded-lg bg-background hover:bg-muted/50 transition-colors"
                         >
                           <div className="flex items-center justify-between">
-                            <div className="flex-1 min-w-0">
-                              <p className="text-sm font-medium truncate">
-                                {layer.text || 'Empty Text'}
-                              </p>
-                              <p className="text-xs text-muted-foreground">
-                                {layer.fontFamily} • {layer.fontSize}px
-                              </p>
+                            <div className="flex items-center gap-3 flex-1 min-w-0">
+                              {/* Image Thumbnail */}
+                              <div className="w-10 h-10 bg-muted rounded-md overflow-hidden flex-shrink-0">
+                                {layer.thumbnail ? (
+                                  <img 
+                                    src={layer.thumbnail} 
+                                    alt={layer.name}
+                                    className="w-full h-full object-cover"
+                                  />
+                                ) : (
+                                  <div className="w-full h-full flex items-center justify-center">
+                                    <Type className="w-4 h-4 text-muted-foreground" />
+                                  </div>
+                                )}
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <p className="text-sm font-medium truncate">
+                                    {layer.name}
+                                  </p>
+                                  <span className="text-xs bg-green-100 text-green-800 px-1.5 py-0.5 rounded">
+                                    Image
+                                  </span>
+                                </div>
+                                <p className="text-xs text-muted-foreground">
+                                  Background • Always bottom layer
+                                </p>
+                              </div>
                             </div>
                             <div className="flex items-center gap-1 ml-2">
                               <Button
@@ -1631,8 +1843,17 @@ export default function ImageEditor() {
                                 size="sm"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  toggleLayerVisibility(layer.id);
+                                  // Toggle background image visibility
+                                  if (canvas && canvas.backgroundImage) {
+                                    const newVisibility = !layer.visible;
+                                    canvas.backgroundImage.visible = newVisibility;
+                                    canvas.renderAll();
+                                    setImageLayers(prev => prev.map(l => 
+                                      l.id === layer.id ? { ...l, visible: newVisibility } : l
+                                    ));
+                                  }
                                 }}
+                                title={layer.visible ? "Hide background" : "Show background"}
                               >
                                 {layer.visible ? (
                                   <Eye className="w-3 h-3" />
@@ -1643,31 +1864,35 @@ export default function ImageEditor() {
                               <Button
                                 variant="ghost"
                                 size="sm"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  moveLayerUp(layer.id);
-                                }}
+                                disabled
+                                title="Background images cannot be moved"
                               >
-                                <ChevronUp className="w-3 h-3" />
+                                <ChevronUp className="w-3 h-3 opacity-30" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                disabled
+                                title="Background images cannot be moved"
+                              >
+                                <ChevronDown className="w-3 h-3 opacity-30" />
                               </Button>
                               <Button
                                 variant="ghost"
                                 size="sm"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  moveLayerDown(layer.id);
-                                }}
-                              >
-                                <ChevronDown className="w-3 h-3" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  deleteTextLayer(layer.id);
+                                  if (confirm('Are you sure you want to remove the background image?')) {
+                                    setBackgroundImage(null);
+                                    setImageLayers([]);
+                                    if (canvas) {
+                                      canvas.backgroundImage = undefined;
+                                      canvas.renderAll();
+                                    }
+                                  }
                                 }}
                                 className="text-destructive hover:text-destructive"
+                                title="Remove background image"
                               >
                                 <Trash2 className="w-3 h-3" />
                               </Button>
@@ -1679,8 +1904,8 @@ export default function ImageEditor() {
                   ) : (
                     <div className="text-center text-muted-foreground py-8">
                       <Layers className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                      <p>No text layers yet</p>
-                      <p className="text-xs">Add your first text layer to get started</p>
+                      <p>No layers yet</p>
+                      <p className="text-xs">Upload an image or add text to get started</p>
                     </div>
                   )}
                 </CardContent>
