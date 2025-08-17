@@ -59,6 +59,7 @@ interface LoadingState {
   canvas: boolean;
   imageLoad: boolean;
   upload: boolean;
+  layerRestore: boolean;
   message?: string;
 }
 
@@ -89,6 +90,7 @@ export default function ImageEditor() {
     canvas: true,
     imageLoad: false,
     upload: false,
+    layerRestore: false,
     message: 'Initializing canvas...'
   });
 
@@ -709,6 +711,12 @@ export default function ImageEditor() {
       console.log('=== LOADING DESIGN STATE ===');
       const saved = localStorage.getItem('imageTextComposerDesign');
       if (saved) {
+        // Set loading state for layer restoration
+        setLoadingState(prev => ({ 
+          ...prev, 
+          layerRestore: true, 
+          message: 'Loading saved design...' 
+        }));
         try {
           const designState: DesignState = JSON.parse(saved);
           console.log('📄 Design state loaded from localStorage');
@@ -791,7 +799,7 @@ export default function ImageEditor() {
           
           // Restore text layers with canvas readiness check
           const restoreTextLayers = (retryCount = 0) => {
-            const maxRetries = 10;
+            const maxRetries = 50;
             const isCanvasReady = canvas && 
                                   canvas.lowerCanvasEl && 
                                   typeof canvas.getContext === 'function' && 
@@ -800,19 +808,43 @@ export default function ImageEditor() {
             
             if (isCanvasReady) {
               console.log('✅ Canvas ready for text layers, restoring...');
+              setLoadingState(prev => ({ 
+                ...prev, 
+                message: `Restoring ${designState.textLayers.length} text layers...` 
+              }));
+              
               designState.textLayers.forEach(layer => {
                 addTextToCanvas(layer, canvas);
               });
               setTextLayers(designState.textLayers);
+              
+              // Clear loading state after restoration
+              setTimeout(() => {
+                setLoadingState(prev => ({ 
+                  ...prev, 
+                  layerRestore: false, 
+                  message: undefined 
+                }));
+              }, 500);
+              
               console.log('✅ Text layers restored');
               console.log('=== LOAD COMPLETE ===');
             } else if (retryCount < maxRetries) {
               console.log(`⏳ Canvas not ready for text layers, retry ${retryCount + 1}/${maxRetries}`);
+              setLoadingState(prev => ({ 
+                ...prev, 
+                message: `Waiting for canvas... (${retryCount + 1}/${maxRetries})` 
+              }));
               setTimeout(() => restoreTextLayers(retryCount + 1), 300);
             } else {
               console.error('❌ Canvas not ready for text layers after all retries, setting state only');
               // Still set the text layers state even if we can't add to canvas
               setTextLayers(designState.textLayers);
+              setLoadingState(prev => ({ 
+                ...prev, 
+                layerRestore: false, 
+                message: undefined 
+              }));
               console.log('📌 Text layers will be added when canvas becomes ready');
             }
           };
@@ -822,9 +854,19 @@ export default function ImageEditor() {
           
         } catch (error) {
           console.error('❌ Failed to load from storage:', error);
+          setLoadingState(prev => ({ 
+            ...prev, 
+            layerRestore: false, 
+            message: undefined 
+          }));
         }
       } else {
         console.log('ℹ️ No saved design state found');
+        setLoadingState(prev => ({ 
+          ...prev, 
+          layerRestore: false, 
+          message: undefined 
+        }));
       }
     };
     
@@ -861,6 +903,12 @@ export default function ImageEditor() {
           console.log('🔄 Canvas ready and text layers missing, adding now...');
           console.log(`Missing ${textLayers.length - textObjectsOnCanvas.length} text layers`);
           
+          setLoadingState(prev => ({ 
+            ...prev, 
+            layerRestore: true, 
+            message: `Adding ${textLayers.length - textObjectsOnCanvas.length} missing layers...` 
+          }));
+          
           textLayers.forEach(layer => {
             // Only add if not already on canvas
             const existsOnCanvas = canvasObjects.some(obj => 
@@ -872,6 +920,15 @@ export default function ImageEditor() {
               addTextToCanvas(layer, canvas);
             }
           });
+          
+          // Clear loading state after adding layers
+          setTimeout(() => {
+            setLoadingState(prev => ({ 
+              ...prev, 
+              layerRestore: false, 
+              message: undefined 
+            }));
+          }, 300);
         }
       }
     }
@@ -2071,7 +2128,7 @@ export default function ImageEditor() {
           />
           
           {/* Loading Overlay */}
-          {(loadingState.canvas || loadingState.imageLoad || loadingState.upload) && (
+          {(loadingState.canvas || loadingState.imageLoad || loadingState.upload || loadingState.layerRestore) && (
             <div className="absolute inset-0 bg-background/80 backdrop-blur-sm flex items-center justify-center rounded-md">
               <div className="text-center p-6">
                 <div className="relative">
@@ -2079,6 +2136,11 @@ export default function ImageEditor() {
                   {loadingState.upload && (
                     <div className="absolute inset-0 flex items-center justify-center">
                       <Upload className="w-6 h-6 text-primary" />
+                    </div>
+                  )}
+                  {loadingState.layerRestore && (
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <Layers className="w-6 h-6 text-primary" />
                     </div>
                   )}
                 </div>
@@ -2090,11 +2152,16 @@ export default function ImageEditor() {
                     Please wait while we process your image
                   </p>
                 )}
+                {loadingState.layerRestore && (
+                  <p className="text-sm text-muted-foreground mt-2">
+                    Restoring your design layers
+                  </p>
+                )}
               </div>
             </div>
           )}
           
-          {!backgroundImage && !loadingState.canvas && !loadingState.imageLoad && !loadingState.upload && (
+          {!backgroundImage && !loadingState.canvas && !loadingState.imageLoad && !loadingState.upload && !loadingState.layerRestore && (
             <div className="absolute inset-4 flex items-center justify-center text-muted-foreground pointer-events-none">
               <div className="text-center">
                 <Upload className="w-12 h-12 mx-auto mb-4 opacity-50" />
