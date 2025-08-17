@@ -13,7 +13,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Slider } from '@/components/ui/slider';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { cn } from '@/lib/utils';
-import { uploadImageToSupabase, getImageFromSupabase, deleteImageFromSupabase, shouldUseSupabase } from '@/lib/supabase';
+import { uploadImageToSupabase, getImageFromSupabase, deleteImageFromSupabase, shouldUseSupabase, getImagePublicUrl } from '@/lib/supabase';
 
 interface TextLayer {
   id: string;
@@ -262,24 +262,38 @@ export default function ImageEditor() {
     setHistory(newHistory);
   }, [backgroundImage, textLayers, canvasSize, history, historyIndex]);
 
-  const loadBackgroundImage = useCallback((imageUrl: string, fabricCanvas: fabric.Canvas, isFromSupabase = false, retryCount = 0) => {
-    console.log('Loading background image...', isFromSupabase ? '(from Supabase)' : '(data URL)', `(retry: ${retryCount})`);
+  const loadBackgroundImage = useCallback((imageUrl: string, fabricCanvas: fabric.Canvas, retryCount = 0) => {
+    console.log('Loading background image...', `(retry: ${retryCount})`, `(imageUrl: ${imageUrl})`);
     
     setLoadingState(prev => ({ 
       ...prev, 
       imageLoad: true, 
-      message: isFromSupabase ? 'Loading image from Supabase...' : 'Loading image...' 
+      message: 'Loading image...' 
     }));
-    
-    // Check if canvas is ready before proceeding
+
+     // Check if canvas is ready before proceeding
     const isCanvasReady = () => {
       try {
-        return fabricCanvas && 
+        const checks = {
+          fabricCanvas: !!fabricCanvas,
+          lowerCanvasEl: !!fabricCanvas?.lowerCanvasEl,
+          getContext: typeof fabricCanvas?.getContext === 'function',
+          canvasContext: !!fabricCanvas?.lowerCanvasEl?.getContext,
+          canvas2dContext: !!fabricCanvas?.lowerCanvasEl?.getContext?.('2d'),
+          notDisposed: !(fabricCanvas as { disposed?: boolean })?.disposed
+        };
+        
+        console.log('🔍 Canvas readiness check:', checks);
+        
+        const isReady = fabricCanvas && 
                fabricCanvas.lowerCanvasEl && 
                typeof fabricCanvas.getContext === 'function' && 
                fabricCanvas.lowerCanvasEl.getContext && 
                fabricCanvas.lowerCanvasEl.getContext('2d') &&
                !(fabricCanvas as { disposed?: boolean }).disposed;
+               
+        console.log('📊 Canvas ready result:', isReady);
+        return isReady;
       } catch (error) {
         console.warn('Canvas readiness check failed:', error);
         return false;
@@ -287,37 +301,54 @@ export default function ImageEditor() {
     };
     
     if (!isCanvasReady()) {
-      if (retryCount < 15) { // Increased to 15 retries (7.5 seconds)
-        console.warn(`Canvas not ready, retry ${retryCount + 1}/15`);
+      if (retryCount < 5) { // Reduced retries, try a different approach
+        console.warn(`Canvas not ready, retry ${retryCount + 1}/5`);
         setTimeout(() => {
-          loadBackgroundImage(imageUrl, fabricCanvas, isFromSupabase, retryCount + 1);
-        }, 500);
+          loadBackgroundImage(imageUrl, fabricCanvas, retryCount + 1);
+        }, 500); // Shorter delay
         return;
       } else {
-        console.error('Canvas still not ready after maximum retries');
-        console.error('Canvas state:', {
-          fabricCanvas: !!fabricCanvas,
-          lowerCanvasEl: !!fabricCanvas?.lowerCanvasEl,
-          getContext: !!fabricCanvas?.getContext,
-          disposed: (fabricCanvas as { disposed?: boolean })?.disposed
-        });
-        setLoadingState(prev => ({ 
-          ...prev, 
-          imageLoad: false, 
-          message: 'Canvas not responding' 
-        }));
-        alert('Canvas is not responding. Please refresh the page and try again.');
-        return;
+        console.warn('Canvas not fully ready after retries, attempting with basic checks...');
+        
+        // Try with more lenient checks - just require basic canvas
+        if (!fabricCanvas || !fabricCanvas.lowerCanvasEl) {
+          console.error('Canvas fundamentally not available');
+          setLoadingState(prev => ({ 
+            ...prev, 
+            imageLoad: false, 
+            message: 'Canvas not available' 
+          }));
+          alert('Canvas is not available. Please refresh the page and try again.');
+          return;
+        }
+        
+        console.log('⚠️ Proceeding with basic canvas checks...');
+        // Continue with image loading despite readiness check failures
       }
     }
     
-    // For Supabase images with potential CORS issues, use the data URL approach
-    const loadImage = isFromSupabase && imageUrl.includes('.supabase.co') 
-      ? fabric.Image.fromURL(imageUrl, { crossOrigin: 'anonymous' })
-      : fabric.Image.fromURL(imageUrl);
+    // Load image - handle both data URLs and regular URLs
+    console.log('🖼️ Loading image from URL:', imageUrl.substring(0, 100) + (imageUrl.length > 100 ? '...' : ''));
+    
+    // Configure CORS settings for Supabase URLs
+    const imageOptions = {
+      crossOrigin: imageUrl.includes('supabase.co') ? 'anonymous' as const : undefined
+    };
+    if (imageUrl.includes('supabase.co')) {
+      console.log('🔗 Detected Supabase URL, setting CORS to anonymous');
+    }
+    
+    console.log('🚀 Starting fabric.Image.fromURL with options:', imageOptions);
+    const loadImage = fabric.Image.fromURL(imageUrl, imageOptions);
     
     loadImage.then((img) => {
-      console.log('Image loaded successfully:', img.width, 'x', img.height);
+      console.log('✅ Image loaded successfully:', img.width, 'x', img.height);
+      console.log('📊 Image object details:', {
+        width: img.width,
+        height: img.height,
+        src: img.getSrc?.() || 'unknown',
+        crossOrigin: img.getCrossOrigin?.() || 'unknown'
+      });
       
       // Calculate new canvas size maintaining aspect ratio
       const maxWidth = 1200;
@@ -345,34 +376,32 @@ export default function ImageEditor() {
       
       // Update canvas dimensions safely
       try {
-        // Check if canvas is properly initialized
+        console.log('🔧 Attempting to set canvas dimensions...');
+        // Always update state first
+        setCanvasSize({ width: newWidth, height: newHeight });
+        
+        // Try to set canvas dimensions
         if (fabricCanvas && fabricCanvas.lowerCanvasEl) {
           fabricCanvas.setDimensions({ width: newWidth, height: newHeight });
-          setCanvasSize({ width: newWidth, height: newHeight });
-          console.log('Canvas dimensions set successfully');
+          console.log('✅ Canvas dimensions set successfully');
         } else {
-          console.warn('Canvas not ready, deferring dimension setting');
-          // Update state first
-          setCanvasSize({ width: newWidth, height: newHeight });
-          // Try again after a delay
-          setTimeout(() => {
-            try {
-              if (fabricCanvas && fabricCanvas.lowerCanvasEl) {
-                fabricCanvas.setDimensions({ width: newWidth, height: newHeight });
-                console.log('Canvas dimensions set on retry');
-              }
-            } catch (retryError) {
-              console.error('Retry canvas dimension setting failed:', retryError);
-            }
-          }, 200);
+          console.warn('⚠️ Canvas element not ready for dimension setting, state updated');
         }
       } catch (error) {
-        console.error('Error setting canvas dimensions:', error);
-        // Fallback: just update the size state
-        setCanvasSize({ width: newWidth, height: newHeight });
+        console.error('❌ Error setting canvas dimensions:', error);
+        console.log('📏 Canvas size state updated despite dimension setting failure');
       }
       
       // Configure image for background
+      console.log('🎨 Configuring image for background with scale:', {
+        scaleX: newWidth / imgWidth,
+        scaleY: newHeight / imgHeight,
+        newWidth,
+        newHeight,
+        imgWidth,
+        imgHeight
+      });
+      
       img.set({
         left: 0,
         top: 0,
@@ -383,10 +412,36 @@ export default function ImageEditor() {
         crossOrigin: 'anonymous'
       });
       
+      console.log('📐 Image configured, setting as background...');
+      
       // Set as background and render
-      fabricCanvas.backgroundImage = img;
-      fabricCanvas.renderAll();
-      console.log('Background image set and rendered successfully');
+      try {
+        fabricCanvas.backgroundImage = img;
+        console.log('🖼️ Background image set on canvas, rendering...');
+        
+        fabricCanvas.renderAll();
+        console.log('✅ Background image set and rendered successfully');
+      } catch (renderError) {
+        console.error('❌ Error setting background or rendering:', renderError);
+        console.log('🔄 Attempting fallback render...');
+        
+        // Try a simpler approach
+        try {
+          fabricCanvas.backgroundImage = img;
+          setTimeout(() => {
+            fabricCanvas.renderAll();
+            console.log('✅ Fallback render successful');
+          }, 100);
+        } catch (fallbackError) {
+          console.error('❌ Fallback render also failed:', fallbackError);
+        }
+      }
+      
+      // Double-check that the background image was actually set
+      console.log('🔍 Canvas background check:', {
+        hasBackgroundImage: !!fabricCanvas.backgroundImage,
+        backgroundImageType: fabricCanvas.backgroundImage?.type || 'none'
+      });
       
       // Force a re-render after a short delay to ensure visibility
       setTimeout(() => {
@@ -400,17 +455,58 @@ export default function ImageEditor() {
       }, 100);
       
     }).catch((error) => {
-      console.error('Error loading image:', error);
+      console.error('❌ Error loading image:', error);
+      console.error('❌ Error details:', {
+        name: error.name,
+        message: error.message,
+        stack: error.stack,
+        imageUrl: imageUrl.substring(0, 100) + '...'
+      });
+      
+      // Check if it's a CORS error and try fallback
+      if (error.message && (error.message.includes('CORS') || error.message.includes('cross-origin'))) {
+        console.error('🚫 CORS error detected - trying fallback approach...');
+        console.log('🔄 Attempting to load image via data URL fallback...');
+        
+        // Try to get the image as data URL from Supabase if it's a Supabase URL
+        if (imageUrl.includes('supabase.co') && shouldUseSupabase()) {
+          // Extract the path from the public URL
+          const urlParts = imageUrl.split('/storage/v1/object/public/images/');
+          if (urlParts.length > 1) {
+            const imagePath = urlParts[1];
+            console.log('🔄 Trying to load via data URL with path:', imagePath);
+            
+            getImageFromSupabase(imagePath).then(dataUrl => {
+              console.log('✅ Fallback: Got data URL, retrying with data URL...');
+              loadBackgroundImage(dataUrl, fabricCanvas, retryCount + 1);
+            }).catch(fallbackError => {
+              console.error('❌ Fallback also failed:', fallbackError);
+              alert('CORS error: Unable to load image from Supabase. Please check your Supabase bucket CORS settings.');
+            });
+            return; // Don't continue with the original error handling
+          }
+        }
+        
+        alert('CORS error: Unable to load image from Supabase. Please check your Supabase bucket CORS settings.');
+      } else if (error.message && error.message.includes('Failed to fetch')) {
+        console.error('🌐 Network error detected');
+        alert('Network error: Unable to load image. Please check your internet connection and try again.');
+      } else {
+        console.error('🔍 Unknown image loading error');
+        alert('Failed to load image. Please try again or check if the image URL is accessible.');
+      }
+      
       setLoadingState(prev => ({ 
         ...prev, 
         imageLoad: false, 
         message: undefined 
       }));
-      alert('Failed to load image. Please try again.');
     });
   }, []);
 
   const addTextToCanvas = useCallback((layer: TextLayer, fabricCanvas: fabric.Canvas) => {
+    console.log('Adding text to canvas:', layer.id, layer.text);
+    
     const text = new fabric.IText(layer.text, {
       left: layer.x,
       top: layer.y,
@@ -425,7 +521,11 @@ export default function ImageEditor() {
     });
 
     (text as FabricObject).layerId = layer.id;
-    layer.fabricObject = text;
+    
+    // Update the layer with the fabricObject reference immediately
+    setTextLayers(prev => prev.map(l => 
+      l.id === layer.id ? { ...l, fabricObject: text } : l
+    ));
 
     const handleTextChange = () => {
       setTextLayers(prev => prev.map(l => 
@@ -450,7 +550,56 @@ export default function ImageEditor() {
 
     fabricCanvas.add(text);
     fabricCanvas.renderAll();
+    
+    console.log('Text added to canvas successfully:', layer.id);
   }, []);
+
+  // Debug function to check and fix layer references
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const debugLayerReferences = () => {
+    if (!canvas) {
+      console.log('No canvas available for debugging');
+      return;
+    }
+    
+    console.log('=== LAYER DEBUG INFO ===');
+    console.log('Text layers count:', textLayers.length);
+    console.log('Canvas objects count:', canvas.getObjects().length);
+    
+    textLayers.forEach((layer, index) => {
+      console.log(`Layer ${index + 1}:`, {
+        id: layer.id,
+        text: layer.text,
+        hasFabricObject: !!layer.fabricObject,
+        fabricObjectLayerId: layer.fabricObject ? (layer.fabricObject as FabricObject).layerId : 'none'
+      });
+    });
+    
+    canvas.getObjects().forEach((obj, index) => {
+      console.log(`Canvas object ${index + 1}:`, {
+        type: obj.type,
+        layerId: (obj as FabricObject).layerId || 'none'
+      });
+    });
+    
+    // Fix any missing references
+    const updatedLayers = textLayers.map(layer => {
+      if (!layer.fabricObject) {
+        const fabricObject = canvas.getObjects().find(obj => 
+          (obj as FabricObject).layerId === layer.id
+        ) as fabric.IText;
+        
+        if (fabricObject) {
+          console.log('Fixed missing reference for layer:', layer.id);
+          return { ...layer, fabricObject };
+        }
+      }
+      return layer;
+    });
+    
+    setTextLayers(updatedLayers);
+    console.log('=== END LAYER DEBUG ===');
+  };
 
 
 
@@ -489,44 +638,51 @@ export default function ImageEditor() {
           }
           
           // Handle background image
-          let backgroundImageData = designState.backgroundImage;
+          let backgroundImageForCanvas: string | null = null;
           
           // Always prioritize Supabase if configured and path exists
           if (designState.backgroundImagePath && shouldUseSupabase()) {
             console.log('🖼️ Loading image from Supabase with path:', designState.backgroundImagePath);
             try {
-              backgroundImageData = await getImageFromSupabase(designState.backgroundImagePath);
-              if (backgroundImageData) {
-                console.log('✅ Image loaded from Supabase successfully, size:', Math.round(backgroundImageData.length / 1024), 'KB');
+              // Try to get the image as data URL for CORS-safe canvas loading
+              backgroundImageForCanvas = await getImageFromSupabase(designState.backgroundImagePath);
+              if (backgroundImageForCanvas) {
+                console.log('✅ Image loaded from Supabase as data URL, size:', Math.round(backgroundImageForCanvas.length / 1024), 'KB');
+                // Set the background image state to the public URL (for storage)
+                setBackgroundImage(designState.backgroundImage || getImagePublicUrl(designState.backgroundImagePath));
               } else {
                 console.log('❌ Image not found in Supabase');
               }
             } catch (error) {
-              console.error('❌ Failed to load image from Supabase:', error);
-              // Only fall back to localStorage if Supabase fails and data exists
+              console.error('❌ Failed to load image from Supabase as data URL:', error);
+              // Fall back to using the public URL directly
               if (designState.backgroundImage) {
-                console.log('⚠️ Falling back to localStorage image');
-                backgroundImageData = designState.backgroundImage;
+                console.log('⚠️ Falling back to public URL');
+                backgroundImageForCanvas = designState.backgroundImage;
+                setBackgroundImage(designState.backgroundImage);
               }
             }
           } else if (designState.backgroundImage) {
-            console.log('📱 Using image from localStorage (no Supabase path available)');
-            backgroundImageData = designState.backgroundImage;
+            console.log('📱 Using stored background image:', designState.backgroundImage.substring(0, 50) + '...');
+            
+            // Use the stored image directly (could be data URL or regular URL)
+            backgroundImageForCanvas = designState.backgroundImage;
+            setBackgroundImage(designState.backgroundImage);
           }
           
-          if (backgroundImageData) {
-            console.log('🎨 Setting background image and loading to canvas');
-            setBackgroundImage(backgroundImageData);
+          if (backgroundImageForCanvas) {
+            console.log('🎨 Loading background image to canvas');
             
             // Wait a bit for state to update before loading to canvas
             setTimeout(() => {
-              if (canvas && canvas.lowerCanvasEl && backgroundImageData) {
-                loadBackgroundImage(backgroundImageData, canvas, !!designState.backgroundImagePath);
+              if (canvas && canvas.lowerCanvasEl && backgroundImageForCanvas) {
+                // backgroundImageForCanvas can be either a data URL or regular URL
+                loadBackgroundImage(backgroundImageForCanvas, canvas);
               } else {
                 console.log('⏳ Canvas not ready, retrying image load...');
                 setTimeout(() => {
-                  if (canvas && canvas.lowerCanvasEl && backgroundImageData) {
-                    loadBackgroundImage(backgroundImageData, canvas, !!designState.backgroundImagePath);
+                  if (canvas && canvas.lowerCanvasEl && backgroundImageForCanvas) {
+                    loadBackgroundImage(backgroundImageForCanvas, canvas);
                   }
                 }, 500);
               }
@@ -574,7 +730,7 @@ export default function ImageEditor() {
         console.log('Upload state:', uploadState);
         
         const designState: DesignState = {
-          backgroundImage: null, // Never store in localStorage
+          backgroundImage: null, // Will be set below if there's an image
           textLayers,
           canvasWidth: canvasSize.width,
           canvasHeight: canvasSize.height,
@@ -600,13 +756,19 @@ export default function ImageEditor() {
             if (existingPath) {
               console.log('✅ Using existing Supabase path:', existingPath);
               designState.backgroundImagePath = existingPath;
+              // Store the public URL in backgroundImage
+              designState.backgroundImage = getImagePublicUrl(existingPath);
+              console.log('💾 Storing Supabase public URL:', designState.backgroundImage);
             } else {
               console.log('🖼️ Image needs to be uploaded to Supabase...');
               // This should only happen if the image was set directly without going through upload
               try {
                 const imagePath = await uploadImageToSupabase(backgroundImage);
                 designState.backgroundImagePath = imagePath;
+                // Store the public URL in backgroundImage
+                designState.backgroundImage = getImagePublicUrl(imagePath);
                 console.log('✅ Image saved to Supabase with path:', imagePath);
+                console.log('💾 Storing Supabase public URL:', designState.backgroundImage);
                 
                 // Delete any previous image
                 if (saved) {
@@ -628,7 +790,9 @@ export default function ImageEditor() {
             }
           } else {
             console.error('❌ Supabase not configured. Image storage requires Supabase setup.');
-            throw new Error('Supabase is required for image storage. Please configure your environment variables.');
+            // Still store the backgroundImage as data URL for non-Supabase environments
+            designState.backgroundImage = backgroundImage;
+            console.log('💾 Storing data URL as fallback (Supabase not configured)');
           }
         } else {
           console.log('ℹ️ No background image to save or upload in progress');
@@ -685,7 +849,12 @@ export default function ImageEditor() {
       }));
       
       // Load the image to canvas immediately for user feedback
-      loadBackgroundImage(imageUrl, canvas, false);
+      if (canvas && canvas.lowerCanvasEl && !loadingState.canvas) {
+        loadBackgroundImage(imageUrl, canvas);
+      } else {
+        console.warn('⚠️ Canvas not ready during upload (canvas available:', !!canvas, ', canvas element:', !!canvas?.lowerCanvasEl, ', canvas loading:', loadingState.canvas, ')');
+        console.log('Will load image after upload completes');
+      }
       
       try {
         if (shouldUseSupabase()) {
@@ -704,20 +873,41 @@ export default function ImageEditor() {
             message: 'Retrieving uploaded image...' 
           }));
           
-          // Now get the uploaded image from Supabase
-          const uploadedImageUrl = await getImageFromSupabase(imagePath);
-          console.log('✅ Retrieved uploaded image from Supabase');
+          // Verify the upload was successful (could use this for fallback if needed)
+          console.log('✅ Upload verified, using public URL for canvas loading');
           
           setLoadingState(prev => ({ 
             ...prev, 
             message: 'Updating canvas...' 
           }));
           
-          // Set the actual background image from Supabase
-          setBackgroundImage(uploadedImageUrl);
+          // Set the actual background image to the Supabase public URL
+          const publicUrl = getImagePublicUrl(imagePath);
+          console.log('🔗 Generated public URL:', publicUrl);
+          setBackgroundImage(publicUrl);
           
-          // Reload canvas with Supabase image
-          loadBackgroundImage(uploadedImageUrl, canvas, true);
+          // Load canvas with the public URL directly (should work with CORS)
+          if (canvas && canvas.lowerCanvasEl && !loadingState.canvas) {
+            loadBackgroundImage(publicUrl, canvas);
+          } else {
+            console.error('❌ Canvas not available for loading Supabase image (canvas available:', !!canvas, ', canvas element:', !!canvas?.lowerCanvasEl, ', canvas loading:', loadingState.canvas, ')');
+            console.log('⏳ Waiting for canvas to be ready...');
+            
+            // Try again after a delay if canvas is still loading
+            if (loadingState.canvas) {
+              setTimeout(() => {
+                if (canvas && canvas.lowerCanvasEl) {
+                  console.log('🔄 Retrying image load after canvas ready');
+                  loadBackgroundImage(publicUrl, canvas);
+                } else {
+                  console.error('❌ Canvas still not ready after delay');
+                  alert('Canvas not ready. Please try uploading again in a moment.');
+                }
+              }, 1000);
+            } else {
+              alert('Canvas not ready. Please try uploading again in a moment.');
+            }
+          }
           
           console.log('✅ Upload flow completed successfully');
         } else {
@@ -839,30 +1029,90 @@ export default function ImageEditor() {
   };
 
   const moveLayerUp = (layerId: string) => {
+    console.log('Moving layer up:', layerId);
     const layer = textLayers.find(l => l.id === layerId);
-    if (layer?.fabricObject && canvas) {
-      const currentIndex = canvas.getObjects().indexOf(layer.fabricObject);
+    
+    if (!layer) {
+      console.warn('Layer not found:', layerId);
+      return;
+    }
+    
+    if (!canvas) {
+      console.warn('Canvas not available');
+      return;
+    }
+    
+    // Find the fabric object by layerId if fabricObject reference is lost
+    let fabricObject = layer.fabricObject;
+    if (!fabricObject) {
+      console.log('FabricObject reference lost, searching by layerId');
+      fabricObject = canvas.getObjects().find(obj => (obj as FabricObject).layerId === layerId) as fabric.IText;
+      
+      if (fabricObject) {
+        // Update the layer reference
+        setTextLayers(prev => prev.map(l => 
+          l.id === layerId ? { ...l, fabricObject } : l
+        ));
+      }
+    }
+    
+    if (fabricObject) {
+      const currentIndex = canvas.getObjects().indexOf(fabricObject);
+      console.log('Current index:', currentIndex, 'Total objects:', canvas.getObjects().length);
+      
       if (currentIndex < canvas.getObjects().length - 1) {
-        canvas.bringObjectForward(layer.fabricObject);
+        canvas.bringObjectForward(fabricObject);
         canvas.renderAll();
-        console.log('Layer moved up:', layerId);
+        console.log('Layer moved up successfully:', layerId);
       } else {
         console.log('Layer already at top:', layerId);
       }
+    } else {
+      console.warn('FabricObject not found for layer:', layerId);
     }
   };
 
   const moveLayerDown = (layerId: string) => {
+    console.log('Moving layer down:', layerId);
     const layer = textLayers.find(l => l.id === layerId);
-    if (layer?.fabricObject && canvas) {
-      const currentIndex = canvas.getObjects().indexOf(layer.fabricObject);
+    
+    if (!layer) {
+      console.warn('Layer not found:', layerId);
+      return;
+    }
+    
+    if (!canvas) {
+      console.warn('Canvas not available');
+      return;
+    }
+    
+    // Find the fabric object by layerId if fabricObject reference is lost
+    let fabricObject = layer.fabricObject;
+    if (!fabricObject) {
+      console.log('FabricObject reference lost, searching by layerId');
+      fabricObject = canvas.getObjects().find(obj => (obj as FabricObject).layerId === layerId) as fabric.IText;
+      
+      if (fabricObject) {
+        // Update the layer reference
+        setTextLayers(prev => prev.map(l => 
+          l.id === layerId ? { ...l, fabricObject } : l
+        ));
+      }
+    }
+    
+    if (fabricObject) {
+      const currentIndex = canvas.getObjects().indexOf(fabricObject);
+      console.log('Current index:', currentIndex, 'Total objects:', canvas.getObjects().length);
+      
       if (currentIndex > 0) {
-        canvas.sendObjectBackwards(layer.fabricObject);
+        canvas.sendObjectBackwards(fabricObject);
         canvas.renderAll();
-        console.log('Layer moved down:', layerId);
+        console.log('Layer moved down successfully:', layerId);
       } else {
         console.log('Layer already at bottom:', layerId);
       }
+    } else {
+      console.warn('FabricObject not found for layer:', layerId);
     }
   };
 
@@ -885,35 +1135,68 @@ export default function ImageEditor() {
   const restoreState = (state: DesignState) => {
     if (!canvas) return;
 
-    canvas.clear();
-    setBackgroundImage(state.backgroundImage);
-    setCanvasSize({ width: state.canvasWidth, height: state.canvasHeight });
-    canvas.setDimensions({ width: state.canvasWidth, height: state.canvasHeight });
-    
-    if (state.backgroundImage) {
-      loadBackgroundImage(state.backgroundImage, canvas, false);
+    try {
+      // Check if canvas is properly initialized before clearing
+      if (canvas.lowerCanvasEl && canvas.getContext && canvas.getContext()) {
+        canvas.clear();
+        setBackgroundImage(state.backgroundImage);
+        setCanvasSize({ width: state.canvasWidth, height: state.canvasHeight });
+        canvas.setDimensions({ width: state.canvasWidth, height: state.canvasHeight });
+        
+        if (state.backgroundImage) {
+          loadBackgroundImage(state.backgroundImage, canvas);
+        }
+        
+        state.textLayers.forEach(layer => {
+          addTextToCanvas(layer, canvas);
+        });
+        
+        setTextLayers(state.textLayers);
+        console.log('✅ State restored successfully');
+      } else {
+        console.warn('⚠️ Canvas not properly initialized for state restore');
+        // Still update the state even if canvas operations fail
+        setBackgroundImage(state.backgroundImage);
+        setCanvasSize({ width: state.canvasWidth, height: state.canvasHeight });
+        setTextLayers(state.textLayers);
+      }
+    } catch (error) {
+      console.error('❌ Error during state restore:', error);
+      // Continue with state updates even if canvas operations fail
+      setBackgroundImage(state.backgroundImage);
+      setCanvasSize({ width: state.canvasWidth, height: state.canvasHeight });
+      setTextLayers(state.textLayers);
     }
-    
-    state.textLayers.forEach(layer => {
-      addTextToCanvas(layer, canvas);
-    });
-    
-    setTextLayers(state.textLayers);
   };
 
   const exportImage = () => {
-    if (!canvas) return;
+    if (!canvas) {
+      alert('Canvas not available for export. Please try again.');
+      return;
+    }
 
-    const dataURL = canvas.toDataURL({
-      format: 'png',
-      quality: 1,
-      multiplier: 1,
-    });
+    try {
+      // Check if canvas is properly initialized before exporting
+      if (canvas.lowerCanvasEl && canvas.getContext && canvas.getContext()) {
+        const dataURL = canvas.toDataURL({
+          format: 'png',
+          quality: 1,
+          multiplier: 1,
+        });
 
-    const link = document.createElement('a');
-    link.download = 'image-text-composition.png';
-    link.href = dataURL;
-    link.click();
+        const link = document.createElement('a');
+        link.download = 'image-text-composition.png';
+        link.href = dataURL;
+        link.click();
+        console.log('✅ Image exported successfully');
+      } else {
+        console.error('❌ Canvas not properly initialized for export');
+        alert('Canvas is not ready for export. Please try again in a moment.');
+      }
+    } catch (error) {
+      console.error('❌ Error during image export:', error);
+      alert('Failed to export image. Please try again.');
+    }
   };
 
   const resetDesign = async () => {
@@ -945,12 +1228,23 @@ export default function ImageEditor() {
     setCanvasSize({ width: 800, height: 600 });
     
     if (canvas) {
-      canvas.clear();
-      if (canvas.lowerCanvasEl) {
-        canvas.setDimensions({ width: 800, height: 600 });
+      try {
+        // Check if canvas is properly initialized before clearing
+        if (canvas.lowerCanvasEl && canvas.getContext && canvas.getContext()) {
+          canvas.clear();
+          canvas.setDimensions({ width: 800, height: 600 });
+          canvas.backgroundColor = '#ffffff';
+          canvas.renderAll();
+          console.log('✅ Canvas reset successfully');
+        } else {
+          console.warn('⚠️ Canvas not properly initialized, skipping clear operation');
+          // Just update the canvas size state
+          setCanvasSize({ width: 800, height: 600 });
+        }
+      } catch (error) {
+        console.error('❌ Error during canvas reset:', error);
+        // Continue with state reset even if canvas operations fail
       }
-      canvas.backgroundColor = '#ffffff';
-      canvas.renderAll();
     }
     
     console.log('✅ Design reset complete');
