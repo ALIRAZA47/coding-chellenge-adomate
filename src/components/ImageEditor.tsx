@@ -102,13 +102,21 @@ export default function ImageEditor() {
         const data = await response.json();
         const fontNames = data.items?.slice(0, 50).map((font: { family: string }) => font.family) || [];
         setGoogleFonts(['Arial', 'Georgia', 'Times New Roman', 'Courier New', ...fontNames]);
+        
+        // Force canvas re-render when fonts are loaded to ensure proper font rendering
+        setTimeout(() => {
+          if (canvas) {
+            canvas.renderAll();
+            console.log('🔤 Canvas re-rendered after Google Fonts loaded');
+          }
+        }, 1000);
       } catch (error) {
         console.error('Failed to load Google Fonts:', error);
         setGoogleFonts(['Arial', 'Georgia', 'Times New Roman', 'Courier New', 'Helvetica']);
       }
     };
     loadGoogleFonts();
-  }, []);
+  }, [canvas]);
 
   // Initialize Fabric.js canvas with better error handling and timing
   useEffect(() => {
@@ -574,6 +582,35 @@ export default function ImageEditor() {
     console.log('Text added to canvas successfully:', layer.id);
   }, []);
 
+  // Function to repair fabric object references
+  const repairFabricObjectReferences = useCallback(() => {
+    if (!canvas) {
+      console.log('No canvas available for repairing references');
+      return;
+    }
+    
+    console.log('🔧 Repairing fabric object references...');
+    const canvasObjects = canvas.getObjects();
+    
+    setTextLayers(prevLayers => 
+      prevLayers.map(layer => {
+        if (!layer.fabricObject) {
+          const fabricObject = canvasObjects.find(obj => 
+            (obj as FabricObject).layerId === layer.id
+          ) as fabric.IText;
+          
+          if (fabricObject) {
+            console.log('✅ Repaired reference for layer:', layer.id);
+            return { ...layer, fabricObject };
+          } else {
+            console.warn('⚠️ No fabric object found for layer:', layer.id);
+          }
+        }
+        return layer;
+      })
+    );
+  }, [canvas]);
+
   // Debug function to check and fix layer references
   // Generate thumbnail for image layers
   const generateThumbnail = (imageUrl: string): Promise<string> => {
@@ -934,6 +971,19 @@ export default function ImageEditor() {
     }
   }, [canvas, backgroundImage, textLayers, loadingState.canvas, uploadState.isUploading, loadBackgroundImage, addTextToCanvas]);
 
+  // Auto-repair fabric object references when needed
+  useEffect(() => {
+    if (!canvas || textLayers.length === 0) return;
+    
+    // Check if any text layers are missing fabric object references
+    const layersWithoutReferences = textLayers.filter(layer => !layer.fabricObject);
+    
+    if (layersWithoutReferences.length > 0) {
+      console.log(`🔧 Found ${layersWithoutReferences.length} layers without fabric references, repairing...`);
+      repairFabricObjectReferences();
+    }
+  }, [canvas, textLayers, repairFabricObjectReferences]);
+
   // Autosave functionality - Always use Supabase for images
   useEffect(() => {
     if (!canvas) return;
@@ -1211,14 +1261,29 @@ export default function ImageEditor() {
     addToHistory();
   };
 
-  const updateTextLayer = (layerId: string, updates: Partial<TextLayer>) => {
+  const updateTextLayer = useCallback((layerId: string, updates: Partial<TextLayer>) => {
     setTextLayers(layers => 
       layers.map(layer => {
         if (layer.id === layerId) {
           const updatedLayer = { ...layer, ...updates };
           
-          if (layer.fabricObject) {
-            layer.fabricObject.set({
+          // Try to find the fabric object if it's not in the layer reference
+          let fabricObject = layer.fabricObject;
+          if (!fabricObject && canvas) {
+            fabricObject = canvas.getObjects().find(obj => 
+              (obj as FabricObject).layerId === layerId
+            ) as fabric.IText;
+            
+            if (fabricObject) {
+              console.log('🔧 Found missing fabric object reference for layer:', layerId);
+            }
+          }
+          
+          if (fabricObject && canvas) {
+            console.log('🎨 Updating fabric object properties for layer:', layerId, updates);
+            
+            // Update fabric object properties
+            fabricObject.set({
               text: updatedLayer.text,
               fontFamily: updatedLayer.fontFamily,
               fontSize: updatedLayer.fontSize,
@@ -1231,7 +1296,26 @@ export default function ImageEditor() {
               angle: updatedLayer.rotation,
               visible: updatedLayer.visible,
             });
-            canvas?.renderAll();
+            
+            // Force canvas to re-render
+            canvas.renderAll();
+            
+            // If font family changed and it's a Google Font, wait a bit then re-render
+            if (updates.fontFamily && googleFonts.includes(updatedLayer.fontFamily)) {
+              setTimeout(() => {
+                canvas.renderAll();
+                console.log('🔤 Re-rendered after font change:', updatedLayer.fontFamily);
+              }, 200);
+            }
+            
+            // Update the layer with the fabric object reference if it was missing
+            if (!layer.fabricObject) {
+              updatedLayer.fabricObject = fabricObject;
+            }
+            
+            console.log('✅ Fabric object updated and canvas rendered');
+          } else {
+            console.warn('⚠️ No fabric object found for layer:', layerId, 'Canvas available:', !!canvas);
           }
           
           return updatedLayer;
@@ -1239,7 +1323,7 @@ export default function ImageEditor() {
         return layer;
       })
     );
-  };
+  }, [canvas, googleFonts]);
 
   const toggleLayerVisibility = (layerId: string) => {
     const layer = textLayers.find(l => l.id === layerId);
@@ -1516,6 +1600,18 @@ export default function ImageEditor() {
             e.preventDefault();
             redo();
             break;
+          case 'r':
+            // Ctrl/Cmd + R for force refresh (developer tool)
+            if (e.ctrlKey || e.metaKey) {
+              e.preventDefault();
+              console.log('🔄 Force refreshing canvas and repairing references...');
+              repairFabricObjectReferences();
+              if (canvas) {
+                canvas.renderAll();
+                console.log('✅ Canvas force refreshed');
+              }
+            }
+            break;
         }
       }
 
@@ -1557,7 +1653,7 @@ export default function ImageEditor() {
     window.addEventListener('keydown', handleKeyPress);
     return () => window.removeEventListener('keydown', handleKeyPress);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedTextLayer, textLayers, canvas, undo, redo, historyIndex, history]); // updateTextLayer is stable
+  }, [selectedTextLayer, textLayers, canvas, undo, redo, historyIndex, history, repairFabricObjectReferences]); // updateTextLayer is stable
 
   const selectedLayer = textLayers.find(l => l.id === selectedTextLayer);
 
