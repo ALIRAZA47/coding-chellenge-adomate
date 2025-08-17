@@ -611,6 +611,38 @@ export default function ImageEditor() {
     );
   }, [canvas]);
 
+  // Function to synchronize z-order between UI array and fabric canvas
+  const synchronizeZOrder = useCallback(() => {
+    if (!canvas || textLayers.length === 0) {
+      return;
+    }
+    
+    console.log('🔄 Synchronizing z-order...');
+    
+    // Get all canvas objects that are text layers
+    const canvasObjects = canvas.getObjects();
+    const textObjects = canvasObjects.filter(obj => 
+      textLayers.some(layer => (obj as FabricObject).layerId === layer.id)
+    );
+    
+    // Sort text objects according to textLayers array order (bottom to top)
+    const sortedTextObjects = textLayers
+      .map(layer => textObjects.find(obj => (obj as FabricObject).layerId === layer.id))
+      .filter((obj): obj is fabric.Object => obj !== undefined);
+    
+    // Remove all text objects from canvas
+    textObjects.forEach(obj => canvas.remove(obj));
+    
+    // Re-add them in the correct order (this ensures proper z-indexing)
+    sortedTextObjects.forEach((obj, index) => {
+      canvas.add(obj);
+      console.log(`Re-added layer at z-index ${index}:`, (obj as FabricObject).layerId);
+    });
+    
+    canvas.renderAll();
+    console.log('✅ Z-order synchronized');
+  }, [canvas, textLayers]);
+
   // Debug function to check and fix layer references
   // Generate thumbnail for image layers
   const generateThumbnail = (imageUrl: string): Promise<string> => {
@@ -850,10 +882,17 @@ export default function ImageEditor() {
                 message: `Restoring ${designState.textLayers.length} text layers...` 
               }));
               
-              designState.textLayers.forEach(layer => {
+              // Add layers in correct z-order (bottom to top)
+              designState.textLayers.forEach((layer, index) => {
                 addTextToCanvas(layer, canvas);
+                console.log(`Added layer ${index}: ${layer.text} (z-order: ${index})`);
               });
               setTextLayers(designState.textLayers);
+              
+              // Synchronize z-order after restoration
+              setTimeout(() => {
+                synchronizeZOrder();
+              }, 100);
               
               // Clear loading state after restoration
               setTimeout(() => {
@@ -909,7 +948,7 @@ export default function ImageEditor() {
     
     loadFromStorage();
     hasLoadedFromStorage.current = true;
-  }, [canvas, loadBackgroundImage, addTextToCanvas, loadingState]);
+  }, [canvas, loadBackgroundImage, addTextToCanvas, loadingState, synchronizeZOrder]);
 
   // Ensure background image and text layers are loaded when canvas becomes ready
   useEffect(() => {
@@ -958,6 +997,11 @@ export default function ImageEditor() {
             }
           });
           
+          // Synchronize z-order after adding missing layers
+          setTimeout(() => {
+            synchronizeZOrder();
+          }, 100);
+          
           // Clear loading state after adding layers
           setTimeout(() => {
             setLoadingState(prev => ({ 
@@ -969,7 +1013,7 @@ export default function ImageEditor() {
         }
       }
     }
-  }, [canvas, backgroundImage, textLayers, loadingState.canvas, uploadState.isUploading, loadBackgroundImage, addTextToCanvas]);
+  }, [canvas, backgroundImage, textLayers, loadingState.canvas, uploadState.isUploading, loadBackgroundImage, addTextToCanvas, synchronizeZOrder]);
 
   // Auto-repair fabric object references when needed
   useEffect(() => {
@@ -1369,30 +1413,17 @@ export default function ImageEditor() {
     newTextLayers.splice(currentIndex + 1, 0, movedLayer);
     setTextLayers(newTextLayers);
     
-    // Update fabric canvas z-order
-    const layer = textLayers[currentIndex];
-    let fabricObject = layer.fabricObject;
+    // Use the updated layers for z-order synchronization
+    console.log('Layer moved up in array, synchronizing z-order...');
     
-    if (!fabricObject) {
-      console.log('FabricObject reference lost, searching by layerId');
-      fabricObject = canvas.getObjects().find(obj => (obj as FabricObject).layerId === layerId) as fabric.IText;
-      
-      if (fabricObject) {
-        // Update the layer reference
-        setTextLayers(prev => prev.map(l => 
-          l.id === layerId ? { ...l, fabricObject } : l
-        ));
+    // Synchronize z-order after state update
+    setTimeout(() => {
+      if (canvas) {
+        synchronizeZOrder();
+        addToHistory();
+        console.log('Layer moved up successfully:', layerId);
       }
-    }
-    
-    if (fabricObject) {
-      canvas.bringObjectForward(fabricObject);
-      canvas.renderAll();
-      console.log('Layer moved up successfully:', layerId);
-      addToHistory();
-    } else {
-      console.warn('FabricObject not found for layer:', layerId);
-    }
+    }, 50);
   };
 
   const moveLayerDown = (layerId: string) => {
@@ -1422,30 +1453,17 @@ export default function ImageEditor() {
     newTextLayers.splice(currentIndex - 1, 0, movedLayer);
     setTextLayers(newTextLayers);
     
-    // Update fabric canvas z-order
-    const layer = textLayers[currentIndex];
-    let fabricObject = layer.fabricObject;
+    // Use the updated layers for z-order synchronization
+    console.log('Layer moved down in array, synchronizing z-order...');
     
-    if (!fabricObject) {
-      console.log('FabricObject reference lost, searching by layerId');
-      fabricObject = canvas.getObjects().find(obj => (obj as FabricObject).layerId === layerId) as fabric.IText;
-      
-      if (fabricObject) {
-        // Update the layer reference
-        setTextLayers(prev => prev.map(l => 
-          l.id === layerId ? { ...l, fabricObject } : l
-        ));
+    // Synchronize z-order after state update
+    setTimeout(() => {
+      if (canvas) {
+        synchronizeZOrder();
+        addToHistory();
+        console.log('Layer moved down successfully:', layerId);
       }
-    }
-    
-    if (fabricObject) {
-      canvas.sendObjectBackwards(fabricObject);
-      canvas.renderAll();
-      console.log('Layer moved down successfully:', layerId);
-      addToHistory();
-    } else {
-      console.warn('FabricObject not found for layer:', layerId);
-    }
+    }, 50);
   };
 
   const undo = () => {
@@ -1607,8 +1625,9 @@ export default function ImageEditor() {
               console.log('🔄 Force refreshing canvas and repairing references...');
               repairFabricObjectReferences();
               if (canvas) {
+                synchronizeZOrder();
                 canvas.renderAll();
-                console.log('✅ Canvas force refreshed');
+                console.log('✅ Canvas force refreshed with z-order sync');
               }
             }
             break;
@@ -1653,7 +1672,7 @@ export default function ImageEditor() {
     window.addEventListener('keydown', handleKeyPress);
     return () => window.removeEventListener('keydown', handleKeyPress);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedTextLayer, textLayers, canvas, undo, redo, historyIndex, history, repairFabricObjectReferences]); // updateTextLayer is stable
+  }, [selectedTextLayer, textLayers, canvas, undo, redo, historyIndex, history, repairFabricObjectReferences, synchronizeZOrder]); // updateTextLayer is stable
 
   const selectedLayer = textLayers.find(l => l.id === selectedTextLayer);
 
