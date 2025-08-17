@@ -519,6 +519,12 @@ export default function ImageEditor() {
   const addTextToCanvas = useCallback((layer: TextLayer, fabricCanvas: fabric.Canvas) => {
     console.log('Adding text to canvas:', layer.id, layer.text);
     
+    // Safety check - ensure canvas is ready
+    if (!fabricCanvas || !fabricCanvas.lowerCanvasEl || !fabricCanvas.getContext) {
+      console.warn('⚠️ Canvas not ready for adding text layer:', layer.id);
+      return;
+    }
+    
     const text = new fabric.IText(layer.text, {
       left: layer.x,
       top: layer.y,
@@ -691,7 +697,13 @@ export default function ImageEditor() {
 
   // Load from localStorage once when canvas is ready
   useEffect(() => {
-    if (!canvas || hasLoadedFromStorage.current) return;
+    if (!canvas || hasLoadedFromStorage.current) {
+      console.log('🔍 Load from storage skipped:', { 
+        hasCanvas: !!canvas, 
+        hasLoaded: hasLoadedFromStorage.current 
+      });
+      return;
+    }
     
     const loadFromStorage = async () => {
       console.log('=== LOADING DESIGN STATE ===');
@@ -777,14 +789,36 @@ export default function ImageEditor() {
             console.log('ℹ️ No background image to restore');
           }
           
-          // Restore text layers
-          designState.textLayers.forEach(layer => {
-            addTextToCanvas(layer, canvas);
-          });
+          // Restore text layers with canvas readiness check
+          const restoreTextLayers = (retryCount = 0) => {
+            const maxRetries = 10;
+            const isCanvasReady = canvas && 
+                                  canvas.lowerCanvasEl && 
+                                  typeof canvas.getContext === 'function' && 
+                                  !canvas.disposed &&
+                                  !loadingState.canvas;
+            
+            if (isCanvasReady) {
+              console.log('✅ Canvas ready for text layers, restoring...');
+              designState.textLayers.forEach(layer => {
+                addTextToCanvas(layer, canvas);
+              });
+              setTextLayers(designState.textLayers);
+              console.log('✅ Text layers restored');
+              console.log('=== LOAD COMPLETE ===');
+            } else if (retryCount < maxRetries) {
+              console.log(`⏳ Canvas not ready for text layers, retry ${retryCount + 1}/${maxRetries}`);
+              setTimeout(() => restoreTextLayers(retryCount + 1), 300);
+            } else {
+              console.error('❌ Canvas not ready for text layers after all retries, setting state only');
+              // Still set the text layers state even if we can't add to canvas
+              setTextLayers(designState.textLayers);
+              console.log('📌 Text layers will be added when canvas becomes ready');
+            }
+          };
           
-          setTextLayers(designState.textLayers);
-          console.log('✅ Text layers restored');
-          console.log('=== LOAD COMPLETE ===');
+          // Start text layer restoration
+          restoreTextLayers();
           
         } catch (error) {
           console.error('❌ Failed to load from storage:', error);
@@ -796,24 +830,52 @@ export default function ImageEditor() {
     
     loadFromStorage();
     hasLoadedFromStorage.current = true;
-  }, [canvas, loadBackgroundImage, addTextToCanvas]);
+  }, [canvas, loadBackgroundImage, addTextToCanvas, loadingState]);
 
-  // Ensure background image is loaded when canvas becomes ready
+  // Ensure background image and text layers are loaded when canvas becomes ready
   useEffect(() => {
-    if (!canvas || !backgroundImage || loadingState.canvas || uploadState.isUploading) {
+    if (!canvas || loadingState.canvas || uploadState.isUploading) {
       return;
     }
     
-    // Check if canvas is ready and doesn't already have a background image
+    // Check if canvas is ready
     const isCanvasReady = canvas.lowerCanvasEl && 
                           typeof canvas.getContext === 'function' && 
                           !canvas.disposed;
     
-    if (isCanvasReady && !canvas.backgroundImage) {
-      console.log('🔄 Canvas ready and background image pending, loading now...');
-      loadBackgroundImage(backgroundImage, canvas);
+    if (isCanvasReady) {
+      // Handle background image if needed
+      if (backgroundImage && !canvas.backgroundImage) {
+        console.log('🔄 Canvas ready and background image pending, loading now...');
+        loadBackgroundImage(backgroundImage, canvas);
+      }
+      
+      // Handle text layers if they exist in state but not on canvas
+      if (textLayers.length > 0) {
+        const canvasObjects = canvas.getObjects();
+        const textObjectsOnCanvas = canvasObjects.filter(obj => 
+          textLayers.some(layer => (obj as FabricObject).layerId === layer.id)
+        );
+        
+        if (textObjectsOnCanvas.length < textLayers.length) {
+          console.log('🔄 Canvas ready and text layers missing, adding now...');
+          console.log(`Missing ${textLayers.length - textObjectsOnCanvas.length} text layers`);
+          
+          textLayers.forEach(layer => {
+            // Only add if not already on canvas
+            const existsOnCanvas = canvasObjects.some(obj => 
+              (obj as FabricObject).layerId === layer.id
+            );
+            
+            if (!existsOnCanvas) {
+              console.log('Adding missing text layer:', layer.id, layer.text);
+              addTextToCanvas(layer, canvas);
+            }
+          });
+        }
+      }
     }
-  }, [canvas, backgroundImage, loadingState.canvas, uploadState.isUploading, loadBackgroundImage]);
+  }, [canvas, backgroundImage, textLayers, loadingState.canvas, uploadState.isUploading, loadBackgroundImage, addTextToCanvas]);
 
   // Autosave functionality - Always use Supabase for images
   useEffect(() => {
