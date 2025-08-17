@@ -12,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 
 import { Slider } from '@/components/ui/slider';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
 import { uploadImageToSupabase, getImageFromSupabase, deleteImageFromSupabase, shouldUseSupabase, getImagePublicUrl } from '@/lib/supabase';
 
@@ -797,6 +798,23 @@ export default function ImageEditor() {
     hasLoadedFromStorage.current = true;
   }, [canvas, loadBackgroundImage, addTextToCanvas]);
 
+  // Ensure background image is loaded when canvas becomes ready
+  useEffect(() => {
+    if (!canvas || !backgroundImage || loadingState.canvas || uploadState.isUploading) {
+      return;
+    }
+    
+    // Check if canvas is ready and doesn't already have a background image
+    const isCanvasReady = canvas.lowerCanvasEl && 
+                          typeof canvas.getContext === 'function' && 
+                          !canvas.disposed;
+    
+    if (isCanvasReady && !canvas.backgroundImage) {
+      console.log('🔄 Canvas ready and background image pending, loading now...');
+      loadBackgroundImage(backgroundImage, canvas);
+    }
+  }, [canvas, backgroundImage, loadingState.canvas, uploadState.isUploading, loadBackgroundImage]);
+
   // Autosave functionality - Always use Supabase for images
   useEffect(() => {
     if (!canvas) return;
@@ -934,11 +952,17 @@ export default function ImageEditor() {
       }));
       
       // Load the image to canvas immediately for user feedback
-      if (canvas && canvas.lowerCanvasEl && !loadingState.canvas) {
+      // Use improved canvas readiness check
+      const isCanvasReady = canvas && 
+                            canvas.lowerCanvasEl && 
+                            typeof canvas.getContext === 'function' && 
+                            !canvas.disposed &&
+                            !loadingState.canvas;
+      
+      if (isCanvasReady) {
         loadBackgroundImage(imageUrl, canvas);
       } else {
-        console.warn('⚠️ Canvas not ready during upload (canvas available:', !!canvas, ', canvas element:', !!canvas?.lowerCanvasEl, ', canvas loading:', loadingState.canvas, ')');
-        console.log('Will load image after upload completes');
+        console.log('⏳ Canvas not ready during upload, will load after Supabase upload completes');
       }
       
       try {
@@ -972,27 +996,29 @@ export default function ImageEditor() {
           setBackgroundImage(publicUrl);
           
           // Load canvas with the public URL directly (should work with CORS)
-          if (canvas && canvas.lowerCanvasEl && !loadingState.canvas) {
-            loadBackgroundImage(publicUrl, canvas);
-          } else {
-            console.error('❌ Canvas not available for loading Supabase image (canvas available:', !!canvas, ', canvas element:', !!canvas?.lowerCanvasEl, ', canvas loading:', loadingState.canvas, ')');
-            console.log('⏳ Waiting for canvas to be ready...');
+          // Use improved canvas readiness check with retry mechanism
+          const tryLoadImage = (retryCount = 0) => {
+            const maxRetries = 50;
+            const isCanvasReady = canvas && 
+                                  canvas.lowerCanvasEl && 
+                                  typeof canvas.getContext === 'function' && 
+                                  !canvas.disposed &&
+                                  !loadingState.canvas;
             
-            // Try again after a delay if canvas is still loading
-            if (loadingState.canvas) {
-              setTimeout(() => {
-                if (canvas && canvas.lowerCanvasEl) {
-                  console.log('🔄 Retrying image load after canvas ready');
-                  loadBackgroundImage(publicUrl, canvas);
-                } else {
-                  console.error('❌ Canvas still not ready after delay');
-                  alert('Canvas not ready. Please try uploading again in a moment.');
-                }
-              }, 1000);
+            if (isCanvasReady) {
+              console.log('✅ Canvas ready, loading image');
+              loadBackgroundImage(publicUrl, canvas);
+            } else if (retryCount < maxRetries) {
+              console.log(`⏳ Canvas not ready, retry ${retryCount + 1}/${maxRetries} (canvas:${!!canvas}, element:${!!canvas?.lowerCanvasEl}, loading:${loadingState.canvas})`);
+              setTimeout(() => tryLoadImage(retryCount + 1), 500);
             } else {
-              alert('Canvas not ready. Please try uploading again in a moment.');
+              console.error('❌ Canvas still not ready after all retries');
+              // Don't show alert, just log the error - the image will be loaded when canvas becomes ready
+              console.log('📌 Image will be loaded when canvas becomes available');
             }
-          }
+          };
+          
+          tryLoadImage();
           
           console.log('✅ Upload flow completed successfully');
         } else {
@@ -1417,7 +1443,8 @@ export default function ImageEditor() {
   const selectedLayer = textLayers.find(l => l.id === selectedTextLayer);
 
   return (
-    <div className="flex h-screen bg-background">
+    <TooltipProvider>
+      <div className="flex h-screen bg-background">
       {/* Sidebar */}
       <div className="w-80 border-r bg-card shadow-sm overflow-y-auto">
         <div className="p-6 space-y-6">
@@ -1743,58 +1770,85 @@ export default function ImageEditor() {
                                   </p>
                                 </div>
                               </div>
-                              <div className="flex items-center gap-1 ml-2">
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    toggleLayerVisibility(layer.id);
-                                  }}
-                                  title={layer.visible ? "Hide layer" : "Show layer"}
-                                >
-                                  {layer.visible ? (
-                                    <Eye className="w-3 h-3" />
-                                  ) : (
-                                    <EyeOff className="w-3 h-3" />
-                                  )}
-                                </Button>
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    moveLayerUp(layer.id);
-                                  }}
-                                  disabled={actualIndex === textLayers.length - 1}
-                                  title="Move layer up"
-                                >
-                                  <ChevronUp className="w-3 h-3" />
-                                </Button>
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    moveLayerDown(layer.id);
-                                  }}
-                                  disabled={actualIndex === 0}
-                                  title="Move layer down"
-                                >
-                                  <ChevronDown className="w-3 h-3" />
-                                </Button>
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    deleteTextLayer(layer.id);
-                                  }}
-                                  className="text-destructive hover:text-destructive"
-                                  title="Delete layer"
-                                >
-                                  <Trash2 className="w-3 h-3" />
-                                </Button>
+                              <div className="flex flex-col gap-1 ml-2">
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        toggleLayerVisibility(layer.id);
+                                      }}
+                                      className="h-6 w-6 p-0"
+                                    >
+                                      {layer.visible ? (
+                                        <Eye className="w-3 h-3" />
+                                      ) : (
+                                        <EyeOff className="w-3 h-3" />
+                                      )}
+                                    </Button>
+                                  </TooltipTrigger>
+                                  <TooltipContent>
+                                    <p>{layer.visible ? "Hide layer" : "Show layer"}</p>
+                                  </TooltipContent>
+                                </Tooltip>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        moveLayerUp(layer.id);
+                                      }}
+                                      disabled={actualIndex === textLayers.length - 1}
+                                      className="h-6 w-6 p-0"
+                                    >
+                                      <ChevronUp className="w-3 h-3" />
+                                    </Button>
+                                  </TooltipTrigger>
+                                  <TooltipContent>
+                                    <p>Move layer up</p>
+                                  </TooltipContent>
+                                </Tooltip>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        moveLayerDown(layer.id);
+                                      }}
+                                      disabled={actualIndex === 0}
+                                      className="h-6 w-6 p-0"
+                                    >
+                                      <ChevronDown className="w-3 h-3" />
+                                    </Button>
+                                  </TooltipTrigger>
+                                  <TooltipContent>
+                                    <p>Move layer down</p>
+                                  </TooltipContent>
+                                </Tooltip>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        deleteTextLayer(layer.id);
+                                      }}
+                                      className="text-destructive hover:text-destructive h-6 w-6 p-0"
+                                    >
+                                      <Trash2 className="w-3 h-3" />
+                                    </Button>
+                                  </TooltipTrigger>
+                                  <TooltipContent>
+                                    <p>Delete layer</p>
+                                  </TooltipContent>
+                                </Tooltip>
                               </div>
                             </div>
                           </div>
@@ -1812,6 +1866,7 @@ export default function ImageEditor() {
                               {/* Image Thumbnail */}
                               <div className="w-10 h-10 bg-muted rounded-md overflow-hidden flex-shrink-0">
                                 {layer.thumbnail ? (
+                                  // eslint-disable-next-line @next/next/no-img-element
                                   <img 
                                     src={layer.thumbnail} 
                                     alt={layer.name}
@@ -1837,65 +1892,92 @@ export default function ImageEditor() {
                                 </p>
                               </div>
                             </div>
-                            <div className="flex items-center gap-1 ml-2">
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  // Toggle background image visibility
-                                  if (canvas && canvas.backgroundImage) {
-                                    const newVisibility = !layer.visible;
-                                    canvas.backgroundImage.visible = newVisibility;
-                                    canvas.renderAll();
-                                    setImageLayers(prev => prev.map(l => 
-                                      l.id === layer.id ? { ...l, visible: newVisibility } : l
-                                    ));
-                                  }
-                                }}
-                                title={layer.visible ? "Hide background" : "Show background"}
-                              >
-                                {layer.visible ? (
-                                  <Eye className="w-3 h-3" />
-                                ) : (
-                                  <EyeOff className="w-3 h-3" />
-                                )}
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                disabled
-                                title="Background images cannot be moved"
-                              >
-                                <ChevronUp className="w-3 h-3 opacity-30" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                disabled
-                                title="Background images cannot be moved"
-                              >
-                                <ChevronDown className="w-3 h-3 opacity-30" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  if (confirm('Are you sure you want to remove the background image?')) {
-                                    setBackgroundImage(null);
-                                    setImageLayers([]);
-                                    if (canvas) {
-                                      canvas.backgroundImage = undefined;
-                                      canvas.renderAll();
-                                    }
-                                  }
-                                }}
-                                className="text-destructive hover:text-destructive"
-                                title="Remove background image"
-                              >
-                                <Trash2 className="w-3 h-3" />
-                              </Button>
+                            <div className="flex flex-col gap-1 ml-2">
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      // Toggle background image visibility
+                                      if (canvas && canvas.backgroundImage) {
+                                        const newVisibility = !layer.visible;
+                                        canvas.backgroundImage.visible = newVisibility;
+                                        canvas.renderAll();
+                                        setImageLayers(prev => prev.map(l => 
+                                          l.id === layer.id ? { ...l, visible: newVisibility } : l
+                                        ));
+                                      }
+                                    }}
+                                    className="h-6 w-6 p-0"
+                                  >
+                                    {layer.visible ? (
+                                      <Eye className="w-3 h-3" />
+                                    ) : (
+                                      <EyeOff className="w-3 h-3" />
+                                    )}
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>
+                                  <p>{layer.visible ? "Hide background" : "Show background"}</p>
+                                </TooltipContent>
+                              </Tooltip>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    disabled
+                                    className="h-6 w-6 p-0"
+                                  >
+                                    <ChevronUp className="w-3 h-3 opacity-30" />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>
+                                  <p>Background images cannot be moved</p>
+                                </TooltipContent>
+                              </Tooltip>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    disabled
+                                    className="h-6 w-6 p-0"
+                                  >
+                                    <ChevronDown className="w-3 h-3 opacity-30" />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>
+                                  <p>Background images cannot be moved</p>
+                                </TooltipContent>
+                              </Tooltip>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      if (confirm('Are you sure you want to remove the background image?')) {
+                                        setBackgroundImage(null);
+                                        setImageLayers([]);
+                                        if (canvas) {
+                                          canvas.backgroundImage = undefined;
+                                          canvas.renderAll();
+                                        }
+                                      }
+                                    }}
+                                    className="text-destructive hover:text-destructive h-6 w-6 p-0"
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>
+                                  <p>Remove background image</p>
+                                </TooltipContent>
+                              </Tooltip>
                             </div>
                           </div>
                         </div>
@@ -1962,5 +2044,6 @@ export default function ImageEditor() {
         </Card>
       </div>
     </div>
+    </TooltipProvider>
   );
 }
